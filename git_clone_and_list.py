@@ -113,14 +113,19 @@ def print_tree_structure(repo_path, max_depth=3, current_depth=0, prefix=""):
             print_tree_structure(item, max_depth, current_depth + 1, prefix + extension)
 
 def main():
-    # Hardcoded repository URL - change this to any open source repo you want to clone
-    repo_url = "https://github.com/apache/spark.git"
-    dest_dir = None
+    # Hardcoded repository URL - using a smaller repo for faster cloning in Databricks
+    # You can change this to any open source repo you want to clone
+    repo_url = "https://github.com/octocat/Hello-World.git"  # Small test repo
+    # repo_url = "https://github.com/apache/spark.git"  # Uncomment for Apache Spark (large repo)
     max_depth = 3
     
-    # Extract repository name from URL if destination not provided
-    if not dest_dir:
-        dest_dir = os.path.basename(repo_url.rstrip('/')).replace('.git', '')
+    # Use /tmp directory for Databricks compatibility
+    base_dir = "/tmp"
+    repo_name = os.path.basename(repo_url.rstrip('/')).replace('.git', '')
+    dest_dir = os.path.join(base_dir, repo_name)
+    
+    # Ensure the base directory exists and is writable
+    os.makedirs(base_dir, exist_ok=True)
     
     print("=" * 50)
     print("Git Clone and List Files Script (Python)")
@@ -133,16 +138,39 @@ def main():
     # Remove existing directory if it exists
     if os.path.exists(dest_dir):
         print(f"Warning: Directory '{dest_dir}' already exists. Removing it...")
-        shutil.rmtree(dest_dir)
+        try:
+            shutil.rmtree(dest_dir)
+        except Exception as e:
+            print(f"Error removing existing directory: {e}")
+            # Try with a different name if removal fails
+            import time
+            timestamp = int(time.time())
+            dest_dir = f"{dest_dir}_{timestamp}"
+            print(f"Using alternative directory name: {dest_dir}")
     
     # Clone the repository
     print("Cloning repository...")
-    clone_command = f"git clone {repo_url} {dest_dir}"
+    print(f"Clone command: git clone {repo_url} {dest_dir}")
+    
+    # Ensure git is available
+    git_check = run_command("git --version")
+    if git_check is None:
+        print("❌ Git is not available in this environment")
+        sys.exit(1)
+    else:
+        print(f"Git version: {git_check}")
+    
+    clone_command = f"git clone --depth 1 {repo_url} {dest_dir}"  # Shallow clone for faster execution
     
     if run_command(clone_command) is not None:
         print("✅ Repository cloned successfully!")
     else:
         print("❌ Failed to clone repository")
+        print("This might be due to:")
+        print("- Network connectivity issues")
+        print("- Git not being available")
+        print("- Permission issues with the destination directory")
+        print(f"- Issues with the repository URL: {repo_url}")
         sys.exit(1)
     
     # Change to the cloned directory
