@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.2 - Fixed CLI Path Detection + Environment
+Version: 8.3 - Debug CLI Path Detection
 """
 
 import os
@@ -296,6 +296,7 @@ def inspect_cli_environment() -> dict:
                         inspection_results['cli_paths']['which_databricks'] = actual_path
                         logger.info(f"   ✅ which databricks: {actual_path}")
                     else:
+                        inspection_results['cli_paths']['which_databricks'] = 'not found'
                         logger.info(f"   ❌ which databricks: not found")
                 else:
                     # Test if CLI exists and is executable
@@ -441,7 +442,10 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
             cli_found = False
             cli_path = None
             
+            logger.info(f"🔍 CLI paths found: {inspection_results.get('cli_paths', {})}")
+            
             for path, status in inspection_results.get('cli_paths', {}).items():
+                logger.info(f"🔍 Checking path='{path}', status='{status}'")
                 if path == 'which_databricks' and status != 'not found':
                     # Use the path returned by 'which' command - this is most reliable
                     cli_found = True
@@ -958,7 +962,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.2)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.3)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
