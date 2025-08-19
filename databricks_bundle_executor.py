@@ -315,8 +315,7 @@ def inspect_cli_environment() -> dict:
         # 3. Environment Variables
         logger.info("\n🌍 DATABRICKS ENVIRONMENT VARIABLES:")
         databricks_env_vars = [
-            'DATABRICKS_HOST', 'DATABRICKS_TOKEN', 'DATABRICKS_CLIENT_ID', 
-            'DATABRICKS_CLIENT_SECRET', 'DATABRICKS_CONFIG_PROFILE',
+            'DATABRICKS_HOST', 'DATABRICKS_TOKEN', 'DATABRICKS_CONFIG_PROFILE',
             'DATABRICKS_CLI_FORCE_INTERACTIVE', 'DATABRICKS_CLI_FORCE_NONINTERACTIVE',
             'DATABRICKS_CLI_NONINTERACTIVE', 'DATABRICKS_CLI_BATCH_MODE',
             'DATABRICKS_SERVERLESS_COMPUTE_ID', 'TERM', 'TTY', 'CI', 'DEBIAN_FRONTEND'
@@ -467,7 +466,7 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
             # Test CLI execution and verify environment
             logger.info("🔧 Testing Databricks CLI...")
             logger.info(f"🔑 Environment variables being passed to CLI:")
-            for key in ['DATABRICKS_HOST', 'DATABRICKS_CLIENT_ID', 'DATABRICKS_CLIENT_SECRET']:
+            for key in ['DATABRICKS_HOST', 'DATABRICKS_TOKEN']:
                 value = env.get(key, 'NOT SET')
                 if value != 'NOT SET' and len(value) > 8:
                     display_value = f"{value[:8]}..."
