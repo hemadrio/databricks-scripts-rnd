@@ -1,1079 +1,639 @@
-#!/usr/bin/env python3
 """
-Databricks Bundle Executor Script - Final Version with Secret Resolution
+Databricks Bundle Operations - Spark Task Manager Integration
 
-This script is designed to be executed via Spark Task Manager to perform
-databricks bundle operations (git clone + bundle validate/deploy).
-
-It supports both Personal Access Token and Service Principal authentication
-and integrates with the existing secret resolution API.
-
-Usage via Spark Task Manager:
-    python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
+This module provides databricks bundle operations by leveraging existing
+pipeline fetching and connection infrastructure, and executing operations
+via Spark Task Manager.
 
 Author: DataOps Team
-Version: 8.12 - CLI with Service Principal Parameter Support
+Version: 1.0
 """
 
-import os
-import sys
 import json
-import subprocess
-import tempfile
-import shutil
-import argparse
 import logging
-import requests
-from typing import Dict, Any, Optional
+import os
+import uuid
+from typing import Dict, List, Any, Optional
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
-def parse_arguments():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Databricks Bundle Executor Script')
-    
-    # Git parameters
-    parser.add_argument('--git_url', required=True, help='Git repository URL')
-    parser.add_argument('--git_branch', default='main', help='Git branch to clone')
-    parser.add_argument('--git_token', help='Git personal access token for authentication')
-    
-    # Databricks parameters
-    parser.add_argument('--yaml_path', required=True, help='Path to databricks.yml file')
-    parser.add_argument('--target_env', default='dev', help='Target environment (dev, prod, staging)')
-    parser.add_argument('--databricks_host', help='Databricks workspace host')
-    parser.add_argument('--databricks_token', help='Databricks access token')
-    parser.add_argument('--databricks_client_id', help='Databricks Service Principal client ID')
-    parser.add_argument('--databricks_client_secret', help='Databricks Service Principal client secret')
-    
-    # Connection configurations (JSON strings)
-    parser.add_argument('--git_connection_config', help='Git connection configuration as JSON string')
-    parser.add_argument('--databricks_connection_config', help='Databricks connection configuration as JSON string')
-    
-    # Operation parameters
-    parser.add_argument('--operation', default='validate', choices=['validate', 'deploy', 'destroy', 'run'], 
-                       help='Bundle operation to perform')
-    
-    # Optional parameters
-    parser.add_argument('--timeout', type=int, default=600, help='Operation timeout in seconds')
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
-    
-    return parser.parse_args()
-
-def get_env_or_arg(value: str, env_var: str) -> Optional[str]:
-    """Get value from argument or environment variable"""
-    if value:
-        return value
-    return os.environ.get(env_var)
-
-def parse_connection_config(config_json: str) -> Dict[str, Any]:
-    """Parse connection configuration JSON string"""
-    try:
-        if config_json:
-            return json.loads(config_json)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse connection config: {e}")
-    return {}
-
-def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: Optional[str], databricks_token: Optional[str], client_id: Optional[str] = None, client_secret: Optional[str] = None) -> Dict[str, str]:
+class DatabricksBundleOperations:
     """
-    Setup Databricks authentication based on connection configuration
-    
-    Args:
-        db_config: Databricks connection configuration
-        databricks_host: Databricks host from arguments
-        databricks_token: Databricks token from arguments
-        
-    Returns:
-        Dictionary of environment variables to set
+    Bundle operations class that leverages existing infrastructure and Spark Task Manager
     """
-    env_vars = {}
     
-    # Get host
-    host = databricks_host or db_config.get('workspace_url') or db_config.get('databricks_instance_url')
-    if host:
-        env_vars['DATABRICKS_HOST'] = host.replace('https://', '').replace('http://', '')
-        logger.info(f"🔧 Using Databricks host: {host}")
-    
-    # Prioritize direct parameters over connection config
-    if databricks_token:
-        # Use provided PAT token directly
-        env_vars['DATABRICKS_TOKEN'] = databricks_token
-        logger.info("🔧 Using provided Personal Access Token authentication")
-        logger.info(f"   Token: {databricks_token[:8]}...")
-    elif client_id and client_secret:
-        # Use provided Service Principal credentials directly
-        env_vars['DATABRICKS_CLIENT_ID'] = client_id
-        env_vars['DATABRICKS_CLIENT_SECRET'] = client_secret
-        logger.info("🔧 Using provided Service Principal authentication")
-        logger.info(f"   Client ID: {client_id[:8]}...")
-        logger.info(f"   Client Secret: {client_secret[:8]}...")
-    else:
-        # Fall back to connection config authentication
-        auth_type = db_config.get('authentication_type', 'personal_access_token')
+    def __init__(self, databricks_host: str = None, databricks_token: str = None):
+        """
+        Initialize bundle operations
         
-        if auth_type == 'service_principal':
-            # Service Principal authentication
-            client_id = db_config.get('client_id')
-            secret = db_config.get('secret')
+        Args:
+            databricks_host: Databricks workspace host (from environment if not provided)
+            databricks_token: Databricks API token (from environment if not provided)
+        """
+        self.databricks_host = databricks_host or os.environ.get('DATABRICKS_HOST')
+        self.databricks_token = databricks_token or os.environ.get('DATABRICKS_TOKEN')
+        
+        if not self.databricks_host or not self.databricks_token:
+            raise ValueError("Databricks host and token are required")
+    
+    def _resolve_secrets_in_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Resolve any dbutils.secrets.get() expressions in configuration
+        
+        Args:
+            config: Configuration dictionary that may contain secret expressions
             
-            if client_id and secret:
-                env_vars['DATABRICKS_CLIENT_ID'] = client_id
-                env_vars['DATABRICKS_CLIENT_SECRET'] = secret
-                logger.info("🔧 Using Service Principal authentication")
-                logger.info(f"   Client ID: {client_id[:10]}...")
-            else:
-                logger.error("❌ Service Principal authentication requires client_id and secret")
-                return {}
-        else:
-            # Personal Access Token authentication from config
-            token = db_config.get('personal_access_token') or db_config.get('token')
-            if token:
-                env_vars['DATABRICKS_TOKEN'] = token
-                logger.info("🔧 Using Personal Access Token authentication from config")
-                logger.info(f"   Token: {token[:8]}...")
-            else:
-                logger.error("❌ Personal Access Token authentication requires token")
-                return {}
-    
-    return env_vars
-
-def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], temp_dir: str) -> bool:
-    """
-    Execute git clone operation
-    
-    Args:
-        git_url: Git repository URL
-        git_branch: Git branch to clone
-        git_token: Git personal access token
-        temp_dir: Temporary directory for cloning
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        logger.info(f"🌿 Starting git clone operation")
-        logger.info(f"   URL: {git_url}")
-        logger.info(f"   Branch: {git_branch}")
-        logger.info(f"   Directory: {temp_dir}")
-        
-        # Handle authentication if token provided
-        authenticated_url = git_url
-        if git_token:
-            if 'github.com' in git_url:
-                # For GitHub, use token in URL
-                authenticated_url = git_url.replace('https://', f'https://{git_token}@')
-                logger.info("🔐 Using authenticated GitHub URL")
-            elif 'gitlab.com' in git_url:
-                # For GitLab, use token in URL
-                authenticated_url = git_url.replace('https://', f'https://oauth2:{git_token}@')
-                logger.info("🔐 Using authenticated GitLab URL")
-            else:
-                # For other providers, try token in URL
-                authenticated_url = git_url.replace('https://', f'https://{git_token}@')
-                logger.info("🔐 Using authenticated URL")
-        
-        # Execute git clone
-        clone_cmd = f"git clone {authenticated_url} --depth 1 --branch {git_branch} {temp_dir}"
-        logger.info(f"Executing: {clone_cmd}")
-        
-        clone_result = subprocess.run(
-            clone_cmd, shell=True, capture_output=True, text=True, timeout=300
-        )
-        
-        if clone_result.returncode != 0:
-            logger.error(f"Git clone failed: {clone_result.stderr}")
-            return False
-        
-        logger.info("✅ Git clone completed successfully")
-        return True
-        
-    except subprocess.TimeoutExpired:
-        logger.error("⏰ Git clone operation timed out")
-        return False
-    except Exception as e:
-        logger.error(f"❌ Git clone operation failed: {str(e)}")
-        return False
-
-def create_databricks_config(env_vars: Dict[str, str]) -> str:
-    """
-    Create a temporary .databrickscfg file for non-interactive authentication
-    
-    Args:
-        env_vars: Environment variables for Databricks authentication
-        
-    Returns:
-        Path to the created config file
-    """
-    try:
-        import tempfile
-        import os
-        
-        # Create temporary config file
-        config_fd, config_path = tempfile.mkstemp(suffix='.databrickscfg', prefix='databricks_')
-        
-        # Determine authentication method
-        host = env_vars.get('DATABRICKS_HOST')
-        token = env_vars.get('DATABRICKS_TOKEN')
-        client_id = env_vars.get('DATABRICKS_CLIENT_ID')
-        client_secret = env_vars.get('DATABRICKS_CLIENT_SECRET')
-        
-        config_content = "[DEFAULT]\n"
-        
-        if host:
-            config_content += f"host = https://{host}\n"
-        
-        if token:
-            # Personal Access Token authentication
-            config_content += f"token = {token}\n"
-        elif client_id and client_secret:
-            # Service Principal authentication
-            config_content += f"client_id = {client_id}\n"
-            config_content += f"client_secret = {client_secret}\n"
-        
-        # Add serverless compute configuration
-        config_content += "serverless_compute_id = auto\n"
-        
-        # Write config file
-        with os.fdopen(config_fd, 'w') as f:
-            f.write(config_content)
-        
-        logger.info(f"📝 Created Databricks config file: {config_path}")
-        logger.info(f"📋 Config content preview:")
-        for line in config_content.split('\n'):
-            if line and not any(secret in line.lower() for secret in ['token', 'secret']):
-                logger.info(f"   {line}")
-            elif line:
-                logger.info(f"   {line.split('=')[0]}= ***REDACTED***")
-        
-        return config_path
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to create Databricks config: {str(e)}")
-        return None
-
-def inspect_cli_environment() -> dict:
-    """
-    Inspect the existing Databricks CLI environment and configuration
-    
-    Returns:
-        Dictionary with environment inspection results
-    """
-    inspection_results = {
-        'platform': {},
-        'cli_paths': {},
-        'cli_versions': {},
-        'environment_vars': {},
-        'databricks_config': {},
-        'python_info': {},
-        'system_info': {}
-    }
-    
-    try:
-        logger.info("🔍 INSPECTING DATABRICKS CLI ENVIRONMENT")
-        logger.info("=" * 60)
-        
-        # 1. Platform Information
-        import platform
-        inspection_results['platform'] = {
-            'system': platform.system(),
-            'release': platform.release(),
-            'version': platform.version(),
-            'machine': platform.machine(),
-            'processor': platform.processor(),
-            'architecture': platform.architecture(),
-            'python_version': platform.python_version()
-        }
-        
-        logger.info("🖥️  PLATFORM INFORMATION:")
-        for key, value in inspection_results['platform'].items():
-            logger.info(f"   {key}: {value}")
-        
-        # 2. Check for existing CLI installations
-        logger.info("\n🔧 CHECKING CLI INSTALLATIONS:")
-        possible_cli_paths = [
-            'databricks',
-            '/usr/local/bin/databricks',
-            '/usr/bin/databricks',
-            '/opt/databricks/bin/databricks',
-            'which databricks'
-        ]
-        
-        for cli_path in possible_cli_paths:
-            try:
-                if cli_path == 'which databricks':
-                    result = subprocess.run(['which', 'databricks'], capture_output=True, text=True, timeout=10)
-                    if result.returncode == 0:
-                        actual_path = result.stdout.strip()
-                        inspection_results['cli_paths']['which_databricks'] = actual_path
-                        logger.info(f"   ✅ which databricks: {actual_path}")
+        Returns:
+            Configuration with resolved secrets
+        """
+        try:
+            resolved_config = {}
+            for key, value in config.items():
+                if isinstance(value, str) and 'dbutils.secrets.get' in value:
+                    # Parse dbutils.secrets.get(scope=secret-test, key=client_id) format
+                    if 'scope=' in value and 'key=' in value:
+                        scope_start = value.find('scope=') + 6
+                        scope_end = value.find(',', scope_start)
+                        if scope_end == -1:
+                            scope_end = value.find(')', scope_start)
+                        
+                        key_start = value.find('key=') + 4
+                        key_end = value.find(')', key_start)
+                        
+                        scope = value[scope_start:scope_end].strip().strip("'\"")
+                        secret_key = value[key_start:key_end].strip().strip("'\"")
+                        
+                        logger.info(f"🔍 Resolving secret: {scope}/{secret_key}")
+                        
+                        # Use the existing get_databricks_secret function
+                        from app import get_databricks_secret
+                        success, secret_value, error = get_databricks_secret(scope, secret_key)
+                        
+                        if success:
+                            resolved_config[key] = secret_value
+                            logger.info(f"✅ Successfully resolved secret: {scope}/{secret_key}")
+                        else:
+                            logger.error(f"❌ Failed to resolve secret: {error}")
+                            resolved_config[key] = value  # Keep original value
                     else:
-                        inspection_results['cli_paths']['which_databricks'] = 'not found'
-                        logger.info(f"   ❌ which databricks: not found")
+                        resolved_config[key] = value  # Keep original value
                 else:
-                    # Test if CLI exists and is executable
-                    test_result = subprocess.run([cli_path, '--version'], capture_output=True, text=True, timeout=10)
-                    if test_result.returncode == 0:
-                        inspection_results['cli_paths'][cli_path] = 'found'
-                        inspection_results['cli_versions'][cli_path] = test_result.stdout.strip()
-                        logger.info(f"   ✅ {cli_path}: {test_result.stdout.strip()}")
-                    else:
-                        inspection_results['cli_paths'][cli_path] = 'not_found'
-                        logger.info(f"   ❌ {cli_path}: not found or not executable")
-            except Exception as e:
-                inspection_results['cli_paths'][cli_path] = f'error: {str(e)}'
-                logger.info(f"   ❌ {cli_path}: error - {str(e)}")
+                    resolved_config[key] = value
+            
+            return resolved_config
+            
+        except Exception as e:
+            logger.error(f"❌ Error resolving secrets in config: {str(e)}")
+            return config  # Return original config if resolution fails
+    
+    def extract_bundle_parameters(self, plan_step: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract databricks bundle parameters from plan step configuration
         
-        # 3. Environment Variables
-        logger.info("\n🌍 DATABRICKS ENVIRONMENT VARIABLES:")
-        databricks_env_vars = [
-            'DATABRICKS_HOST', 'DATABRICKS_TOKEN', 'DATABRICKS_CONFIG_PROFILE',
-            'DATABRICKS_CLI_FORCE_INTERACTIVE', 'DATABRICKS_CLI_FORCE_NONINTERACTIVE',
-            'DATABRICKS_CLI_NONINTERACTIVE', 'DATABRICKS_CLI_BATCH_MODE',
-            'DATABRICKS_SERVERLESS_COMPUTE_ID', 'TERM', 'TTY', 'CI', 'DEBIAN_FRONTEND'
-        ]
+        Args:
+            plan_step: Plan step configuration dictionary
+            
+        Returns:
+            Dictionary containing bundle operation parameters
+        """
+        try:
+            # Debug: Check the type and content of plan_step
+            logger.info(f"Plan step type: {type(plan_step)}")
+            logger.info(f"Plan step content: {plan_step}")
+            
+            # Handle case where plan_step might be a string
+            if isinstance(plan_step, str):
+                logger.error(f"Plan step is a string, not a dictionary: {plan_step}")
+                return {}
+            
+            tool = plan_step.get('tool', {})
+            config = tool.get('configuration', {})
+            
+            # Extract git-related parameters
+            git_params = {
+                'git_url': config.get('gitUrl'),
+                'git_branch': config.get('gitBranch'),
+                'git_repository': config.get('gitRepository'),
+                'git_tool_id': config.get('gitToolId'),
+                'ssh_url': config.get('sshUrl'),
+                'repo_id': config.get('repoId'),
+                'service': config.get('service')
+            }
+            
+            # Extract databricks-related parameters
+            databricks_params = {
+                'databricks_tool_id': config.get('toolConfigId'),
+                'workspace': config.get('workspace'),
+                'workspace_name': config.get('workspaceName'),
+                'yaml_path': config.get('yamlPath'),
+                'target_environment': config.get('targetEnvironmentName'),
+                'account_id': config.get('accountId'),
+                'data_ops_tool_type': config.get('dataOpsToolType')
+            }
+            
+            # Extract step metadata
+            metadata = {
+                'step_name': config.get('stepName'),
+                'step_id': plan_step.get('id'),
+                'orchestration_type': plan_step.get('orchestration_type'),
+                'tool_identifier': tool.get('tool_identifier')
+            }
+            
+            bundle_params = {
+                'git_params': git_params,
+                'databricks_params': databricks_params,
+                'metadata': metadata,
+                'raw_config': config
+            }
+            
+            logger.info(f"Extracted bundle parameters for step: {metadata.get('step_name')}")
+            return bundle_params
+            
+        except Exception as e:
+            logger.error(f"Error extracting bundle parameters: {str(e)}")
+            return {}
+    
+    def execute_bundle_operation(self, pipeline_id: str, plan_id: str, 
+                                operation_type: str = "validate",
+                                get_connection_details_func=None,
+                                get_pipeline_func=None,
+                                spark_task_manager=None) -> Dict[str, Any]:
+        """
+        Execute databricks bundle operation using Spark Task Manager
         
-        for var in databricks_env_vars:
-            value = os.environ.get(var)
-            inspection_results['environment_vars'][var] = value
-            if value:
-                # Mask sensitive values
-                if 'TOKEN' in var or 'SECRET' in var:
-                    display_value = f"{value[:8]}..." if len(value) > 8 else "***"
-                else:
-                    display_value = value
-                logger.info(f"   ✅ {var}: {display_value}")
-            else:
-                logger.info(f"   ❌ {var}: not set")
+        Args:
+            pipeline_id: Pipeline unique identifier
+            plan_id: Plan step unique identifier
+            operation_type: Type of operation (validate, deploy, etc.)
+            get_connection_details_func: Function to get connection details (from app.py)
+            get_pipeline_func: Function to get pipeline details (from app.py)
+            spark_task_manager: Spark Task Manager instance for executing the script
+            
+        Returns:
+            Dictionary containing operation results and logs
+        """
+        operation_id = f"bundle_op_{uuid.uuid4().hex[:8]}"
         
-        # 4. All Environment Variables (for debugging)
-        logger.info("\n🔍 ALL ENVIRONMENT VARIABLES:")
-        all_env = dict(os.environ)
-        for key in sorted(all_env.keys()):
-            value = all_env[key]
-            # Only show first 50 chars for very long values
-            display_value = value if len(value) <= 50 else f"{value[:47]}..."
-            logger.info(f"   {key}: {display_value}")
-        
-        # 5. Check for .databrickscfg
-        logger.info("\n📁 DATABRICKS CONFIG FILES:")
-        config_paths = [
-            os.path.expanduser('~/.databrickscfg'),
-            './.databrickscfg',
-            '/root/.databrickscfg'
-        ]
-        
-        for config_path in config_paths:
-            if os.path.exists(config_path):
+        try:
+            logger.info(f"Starting bundle operation {operation_id} for pipeline {pipeline_id}, plan {plan_id}")
+            
+            # Step 1: Get pipeline configuration using existing function
+            if not get_pipeline_func:
+                return {
+                    'success': False,
+                    'error': 'Pipeline fetching function not provided',
+                    'operation_id': operation_id
+                }
+            
+            pipeline_result = get_pipeline_func(pipeline_id)
+            
+            # Debug: Check what type of object we got back
+            logger.info(f"Pipeline result type: {type(pipeline_result)}")
+            if hasattr(pipeline_result, 'json'):
+                logger.info("Pipeline result is a Response object, converting to JSON")
+                pipeline_result = pipeline_result.json()
+            
+            if not pipeline_result or not pipeline_result.get('success'):
+                error_msg = "Unknown error"
+                if isinstance(pipeline_result, dict):
+                    error_msg = pipeline_result.get("error", "Unknown error")
+                return {
+                    'success': False,
+                    'error': f'Failed to fetch pipeline: {error_msg}',
+                    'operation_id': operation_id
+                }
+            
+            pipeline = pipeline_result.get('pipeline', {})
+            workflow_str = pipeline.get('workflow', '{}')
+            
+            # Parse workflow JSON string if it's a string
+            if isinstance(workflow_str, str):
                 try:
-                    with open(config_path, 'r') as f:
-                        config_content = f.read()
-                    inspection_results['databricks_config'][config_path] = 'exists'
-                    logger.info(f"   ✅ {config_path}: exists ({len(config_content)} chars)")
-                    # Show first few lines (non-sensitive)
-                    lines = config_content.split('\n')[:5]
-                    for line in lines:
-                        if line.strip() and not any(sensitive in line.lower() for sensitive in ['token', 'secret', 'password']):
-                            logger.info(f"      {line}")
+                    workflow = json.loads(workflow_str)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse workflow JSON: {e}")
+                    return {
+                        'success': False,
+                        'error': f'Failed to parse workflow JSON: {e}',
+                        'operation_id': operation_id
+                    }
+            else:
+                workflow = workflow_str
+            
+            plan = workflow.get('plan', [])
+            
+            # Step 2: Find the specific plan step
+            plan_step = None
+            for step in plan:
+                if step.get('id') == plan_id:
+                    plan_step = step
+                    break
+            
+            if not plan_step:
+                return {
+                    'success': False,
+                    'error': f'Plan step not found: {plan_id}',
+                    'operation_id': operation_id
+                }
+            
+            # Step 3: Extract bundle parameters
+            bundle_params = self.extract_bundle_parameters(plan_step)
+            if not bundle_params:
+                return {
+                    'success': False,
+                    'error': 'Failed to extract bundle parameters',
+                    'operation_id': operation_id
+                }
+            
+            git_params = bundle_params['git_params']
+            databricks_params = bundle_params['databricks_params']
+            
+            # Step 4: Get connection details using API endpoints
+            databricks_connection = None
+            git_connection = None
+            
+            # Function to get connection details via API
+            def get_connection_via_api(connection_id):
+                try:
+                    import requests
+                    response = requests.get(f"http://localhost:3001/api/connections/{connection_id}")
+                    if response.status_code == 200:
+                        result = response.json()
+                        if result.get('success'):
+                            return result.get('connection')
+                    return None
                 except Exception as e:
-                    inspection_results['databricks_config'][config_path] = f'error: {str(e)}'
-                    logger.info(f"   ❌ {config_path}: error reading - {str(e)}")
-            else:
-                inspection_results['databricks_config'][config_path] = 'not_found'
-                logger.info(f"   ❌ {config_path}: not found")
-        
-        # 6. Python and System Info
-        logger.info("\n🐍 PYTHON ENVIRONMENT:")
-        inspection_results['python_info'] = {
-            'executable': sys.executable,
-            'version': sys.version,
-            'path': sys.path[:3]  # First 3 paths only
-        }
-        
-        logger.info(f"   Python executable: {sys.executable}")
-        logger.info(f"   Python version: {sys.version}")
-        logger.info(f"   Python path (first 3): {sys.path[:3]}")
-        
-        # 7. Working Directory
-        logger.info(f"\n📂 CURRENT WORKING DIRECTORY: {os.getcwd()}")
-        
-        logger.info("=" * 60)
-        logger.info("✅ CLI ENVIRONMENT INSPECTION COMPLETED")
-        
-        return inspection_results
-        
-    except Exception as e:
-        logger.error(f"❌ Environment inspection failed: {str(e)}")
-        inspection_results['error'] = str(e)
-        return inspection_results
-
-def execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
-                           env_vars: Dict[str, str]) -> bool:
-    """
-    Execute databricks bundle operation using downloaded CLI
-    
-    Args:
-        operation: Bundle operation (validate, deploy, etc.)
-        target_env: Target environment
-        work_dir: Working directory
-        env_vars: Environment variables for Databricks authentication
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        logger.info(f"🚀 Starting databricks bundle {operation} operation")
-        logger.info(f"   Target Environment: {target_env}")
-        logger.info(f"   Working Directory: {work_dir}")
-        logger.info(f"   Authentication: {list(env_vars.keys())}")
-        
-        # Debug: List files in working directory
-        try:
-            files = os.listdir(work_dir)
-            logger.info(f"📁 Files in working directory: {files}")
-            if 'databricks.yml' in files:
-                logger.info("✅ databricks.yml found in working directory")
-            else:
-                logger.warning("⚠️ databricks.yml not found in working directory")
+                    logger.error(f"Error getting connection via API: {str(e)}")
+                    return None
+            
+            # Try to get connections from pipeline configuration
+            if databricks_params.get('databricks_tool_id'):
+                logger.info(f"Fetching Databricks connection for ID: {databricks_params['databricks_tool_id']}")
+                databricks_connection = get_connection_via_api(databricks_params['databricks_tool_id'])
+                logger.info(f"Databricks connection found: {databricks_connection is not None}")
+            
+            if git_params.get('git_tool_id'):
+                logger.info(f"Fetching Git connection for ID: {git_params['git_tool_id']}")
+                git_connection = get_connection_via_api(git_params['git_tool_id'])
+                logger.info(f"Git connection found: {git_connection is not None}")
+            
+            # Fallback to hardcoded connection IDs if pipeline config has invalid ones
+            if not databricks_connection:
+                logger.warning("⚠️ Databricks connection not found, trying hardcoded fallback")
+                fallback_databricks_id = "0cc45749ee02b1a52c9a36758a5a174d"
+                databricks_connection = get_connection_via_api(fallback_databricks_id)
+                logger.info(f"Hardcoded Databricks connection found: {databricks_connection is not None}")
+                if databricks_connection:
+                    logger.info(f"Hardcoded Databricks connection type: {type(databricks_connection)}")
+            
+            if not git_connection:
+                logger.warning("⚠️ Git connection not found, trying hardcoded fallback")
+                fallback_git_id = "43cce0c37af2e7ba13dc9cf36df6c679"
+                git_connection = get_connection_via_api(fallback_git_id)
+                logger.info(f"Hardcoded Git connection found: {git_connection is not None}")
+                if git_connection:
+                    logger.info(f"Hardcoded Git connection type: {type(git_connection)}")
+            
+            # Step 5: Execute bundle operation via Spark Task Manager
+            operation_result = self._execute_via_spark_task_manager(
+                operation_id, git_params, databricks_params, 
+                git_connection, databricks_connection, operation_type, spark_task_manager
+            )
+            
+            return {
+                'success': True,
+                'operation_id': operation_id,
+                'pipeline_id': pipeline_id,
+                'plan_id': plan_id,
+                'bundle_params': bundle_params,
+                'operation_result': operation_result
+            }
+            
         except Exception as e:
-            logger.warning(f"⚠️ Could not list files in working directory: {str(e)}")
+            logger.error(f"Bundle operation failed: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'operation_id': operation_id
+            }
+    
+    def _execute_via_spark_task_manager(self, operation_id: str, git_params: Dict[str, Any], 
+                                       databricks_params: Dict[str, Any], git_connection: Optional[Dict[str, Any]], 
+                                       databricks_connection: Optional[Dict[str, Any]], 
+                                       operation_type: str, spark_task_manager) -> Dict[str, Any]:
+        """
+        Execute bundle operation via Spark Task Manager
         
-        # Set up environment variables
-        env = os.environ.copy()
-        env.update(env_vars)
-        
-        # Inspect existing CLI environment instead of downloading
-        logger.info("🔍 Inspecting existing CLI environment...")
-        
+        Args:
+            operation_id: Unique operation identifier
+            git_params: Git-related parameters
+            databricks_params: Databricks-related parameters
+            git_connection: Git connection details
+            databricks_connection: Databricks connection details
+            operation_type: Type of operation to perform
+            spark_task_manager: Spark Task Manager instance
+            
+        Returns:
+            Operation results with logs
+        """
         try:
-            # Perform comprehensive environment inspection
-            inspection_results = inspect_cli_environment()
+            if not spark_task_manager:
+                return {
+                    'success': False,
+                    'error': 'Spark Task Manager not provided',
+                    'logs': ['❌ Spark Task Manager not available']
+                }
             
-            # Check if any CLI was found
-            cli_found = False
-            cli_path = None
+            # Prepare script parameters
+            script_params = [
+                f"--git_url={git_params.get('git_url')}",
+                f"--git_branch={git_params.get('git_branch', 'main')}",
+                f"--yaml_path={databricks_params.get('yaml_path', '')}",
+                f"--target_env={databricks_params.get('target_environment', 'dev')}",
+                f"--operation={operation_type}"
+            ]
             
-            logger.info(f"🔍 CLI paths found: {inspection_results.get('cli_paths', {})}")
+            # Add Service Principal credentials via connection config
+            service_principal_config = {
+                "authentication_type": "service_principal",
+                "client_id": "8f75bdd0-5588-4a53-a18e-3eb4aa8f7acd",
+                "secret": "dose33be8af6c59c358a5b7a4cbf5519f3b6",
+                "workspace_url": "https://dbc-3da7f034-dce2.cloud.databricks.com"
+            }
+            sp_config_json = json.dumps(service_principal_config)
+            script_params.append(f"--databricks_connection_config={sp_config_json}")
+            logger.info(f"✅ Added Service Principal config: {service_principal_config['client_id'][:8]}...")
             
-            for path, status in inspection_results.get('cli_paths', {}).items():
-                logger.info(f"🔍 Checking path='{path}', status='{status}'")
-                if path == 'which_databricks' and status != 'not found':
-                    # Use the path returned by 'which' command - this is most reliable
-                    cli_found = True
-                    cli_path = status  # The actual path from 'which'
-                    logger.info(f"✅ Found working CLI via 'which': {cli_path}")
-                    break
-                elif status == 'found' and path != 'which_databricks':
-                    # Fallback to direct path checks
-                    cli_found = True
-                    cli_path = path
-                    logger.info(f"✅ Found working CLI at: {cli_path}")
-                    break
-            
-            if not cli_found:
-                logger.error("❌ FAILED: No working Databricks CLI found in environment")
-                logger.error("❌ This script requires an existing CLI installation")
-                return False
-            
-            # Test CLI execution and verify environment
-            logger.info("🔧 Testing Databricks CLI...")
-            logger.info(f"🔑 Environment variables being passed to CLI:")
-            for key in ['DATABRICKS_HOST', 'DATABRICKS_TOKEN']:
-                value = env.get(key, 'NOT SET')
-                if value != 'NOT SET' and len(value) > 8:
-                    display_value = f"{value[:8]}..."
+            # Add connection configurations if available
+            if git_connection:
+                logger.info(f"Git connection type: {type(git_connection)}")
+                if isinstance(git_connection, dict):
+                    git_config = git_connection.get('configuration', {})
+                    # Resolve any secrets in git config
+                    git_config = self._resolve_secrets_in_config(git_config)
+                    git_config_json = json.dumps(git_config)
+                    script_params.append(f"--git_connection_config={git_config_json}")
+                    logger.info(f"✅ Added Git connection config: {git_config.get('personal_access_token', 'NO_TOKEN')[:10]}...")
                 else:
-                    display_value = value
-                logger.info(f"   {key}: {display_value}")
-            
-            version_cmd = [cli_path, "version"]
-            version_result = subprocess.run(
-                version_cmd, capture_output=True, text=True, timeout=30, env=env
-            )
-            
-            if version_result.returncode == 0:
-                logger.info(f"✅ CLI version check successful: {version_result.stdout.strip()}")
+                    logger.error(f"❌ Git connection is not a dict: {git_connection}")
             else:
-                logger.warning(f"⚠️ CLI version check failed: {version_result.stderr}")
+                logger.warning("⚠️ No Git connection found")
             
-            # Execute bundle operation using CLI
-            logger.info(f"🔧 Executing bundle {operation} with existing CLI...")
-            logger.info(f"🎯 CLI Path: {cli_path}")
-            bundle_cmd = [cli_path, "bundle", operation]
-            
-            if target_env:
-                bundle_cmd.extend(["-t", target_env])
-            
-            logger.info(f"Executing: {' '.join(bundle_cmd)}")
-            
-            bundle_result = subprocess.run(
-                bundle_cmd, capture_output=True, text=True, timeout=600, 
-                cwd=work_dir, env=env
-            )
-            
-            if bundle_result.returncode == 0:
-                logger.info("✅ Bundle operation completed successfully with downloaded CLI!")
-                if bundle_result.stdout:
-                    logger.info(f"📄 CLI Output:\n{bundle_result.stdout}")
-                return True
+            if databricks_connection:
+                logger.info(f"Databricks connection type: {type(databricks_connection)}")
+                if isinstance(databricks_connection, dict):
+                    db_config = databricks_connection.get('configuration', {})
+                    # Resolve any secrets in databricks config
+                    db_config = self._resolve_secrets_in_config(db_config)
+                    db_config_json = json.dumps(db_config)
+                    script_params.append(f"--databricks_connection_config={db_config_json}")
+                    logger.info(f"✅ Added Databricks connection config: {db_config.get('workspace_url', 'NO_URL')}")
+                else:
+                    logger.error(f"❌ Databricks connection is not a dict: {databricks_connection}")
             else:
-                logger.error(f"❌ Bundle operation failed with return code: {bundle_result.returncode}")
-                if bundle_result.stderr:
-                    logger.error(f"CLI Error: {bundle_result.stderr}")
-                if bundle_result.stdout:
-                    logger.error(f"CLI Output: {bundle_result.stdout}")
+                logger.warning("⚠️ No Databricks connection found")
+            
+            # Add environment variables for Databricks CLI
+            env_vars = {}
+            if databricks_connection:
+                db_config = databricks_connection.get('configuration', {})
+                host = db_config.get('databricks_instance_url') or db_config.get('host')
+                token = db_config.get('personal_access_token') or db_config.get('token')
                 
-                logger.warning("⚠️ CLI failed - attempting CLI download fallback...")
-                logger.info("🔄 Downloading modern CLI with bundle support")
+                if host:
+                    env_vars['DATABRICKS_HOST'] = host.replace('https://', '').replace('http://', '')
+                if token:
+                    env_vars['DATABRICKS_TOKEN'] = token
+            
+            # Execute via Spark Task Manager
+            logger.info(f"🚀 Executing bundle operation via Spark Task Manager")
+            logger.info(f"   Script: databricks_bundle_script.py")
+            logger.info(f"   Parameters: {script_params}")
+            
+            # Use the existing Spark Task Manager to execute the script from Git repository
+            try:
+                result = spark_task_manager.create_spark_python_task(
+                    python_file_path="databricks_bundle_executor.py",
+                    parameters=script_params,
+                    task_name=f"bundle_{operation_type}_{operation_id}",
+                    timeout_seconds=600,
+                    environment_key="Default",
+                    git_source={
+                        "git_url": "https://github.com/hemadrio/databricks-scripts-rnd",
+                        "git_provider": "gitHub",
+                        "git_branch": "main"
+                    },
+                    source_type="GIT"
+                )
                 
-                # Fall back to downloading modern CLI
-                return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
+                # Handle the result properly
+                if hasattr(result, 'json'):
+                    # If it's a Response object, get the JSON
+                    result_data = result.json()
+                elif isinstance(result, dict):
+                    # If it's already a dictionary
+                    result_data = result
+                else:
+                    # Convert to string representation
+                    result_data = str(result)
                 
+            except Exception as e:
+                logger.error(f"Spark Task Manager execution failed: {str(e)}")
+                return {
+                    'success': False,
+                    'error': f'Spark Task Manager execution failed: {str(e)}',
+                    'logs': [f"❌ Spark Task Manager execution failed: {str(e)}"]
+                }
+            
+            # Extract the run ID for monitoring
+            run_id = None
+            if isinstance(result_data, dict):
+                run_id = result_data.get('run_id') or result_data.get('api_response', {}).get('run_id')
+            
+            return {
+                'success': True,
+                'spark_task_result': result_data,
+                'run_id': run_id,
+                'job_monitoring': {
+                    'run_id': run_id,
+                    'logs_endpoint': f"/api/bundle/logs/{run_id}" if run_id else None,
+                    'status_endpoint': f"/api/bundle/status/{run_id}" if run_id else None
+                },
+                'logs': [
+                    f"🚀 Bundle operation submitted via Spark Task Manager",
+                    f"📋 Task Name: bundle_{operation_type}_{operation_id}",
+                    f"🆔 Spark Run ID: {run_id}",
+                    f"🔧 Parameters: {script_params}",
+                    f"📄 Monitor logs at: /api/bundle/logs/{run_id}" if run_id else "📄 No run ID available for monitoring"
+                ]
+            }
+            
         except Exception as e:
-            logger.error(f"❌ CLI inspection or operation failed: {str(e)}")
-            logger.warning("⚠️ CLI failed - attempting CLI download fallback...")
-            logger.info("🔄 Downloading modern CLI with bundle support")
+            logger.error(f"Spark Task Manager execution failed: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e),
+                'logs': [f"❌ Spark Task Manager execution failed: {str(e)}"]
+            }
+        """
+        Execute the actual bundle operation with git clone and databricks commands
+        
+        Args:
+            operation_id: Unique operation identifier
+            git_params: Git-related parameters
+            databricks_params: Databricks-related parameters
+            git_connection: Git connection details
+            databricks_connection: Databricks connection details
+            operation_type: Type of operation to perform
             
-            # Fall back to downloading modern CLI
-            return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
-        
-    except subprocess.TimeoutExpired:
-        logger.error("⏰ Bundle operation timed out")
-        logger.warning("⚠️ CLI timeout - attempting CLI download fallback...")
-        logger.info("🔄 Downloading modern CLI with bundle support")
-        
-        # Fall back to downloading modern CLI after timeout
-        return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
-            
-    except Exception as e:
-        logger.error(f"❌ Bundle operation failed: {str(e)}")
-        logger.warning("⚠️ General error - attempting CLI download fallback...")
-        logger.info("🔄 Downloading modern CLI with bundle support")
-        
-        # Fall back to downloading modern CLI after general error
-        return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
-
-def download_and_execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
-                                        env_vars: Dict[str, str]) -> bool:
-    """
-    Download modern Databricks CLI and execute bundle operation
-    
-    Args:
-        operation: Bundle operation (validate, deploy, etc.)
-        target_env: Target environment
-        work_dir: Working directory
-        env_vars: Environment variables for Databricks authentication
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    import platform
-    import requests
-    import tempfile
-    import shutil
-    
-    try:
-        logger.info("📥 Downloading modern Databricks CLI with bundle support...")
-        
-        # Determine platform and download URL (using latest confirmed version v0.264.2)
-        version = "0.264.2"
-        system = platform.system().lower()
-        if system == "linux":
-            cli_url = f"https://github.com/databricks/cli/releases/download/v{version}/databricks_cli_{version}_linux_amd64.zip"
-        elif system == "darwin":
-            cli_url = f"https://github.com/databricks/cli/releases/download/v{version}/databricks_cli_{version}_darwin_amd64.zip"
-        else:
-            logger.error(f"❌ Unsupported platform: {system}")
-            return False
-        
-        # Create temporary directory for CLI
-        temp_cli_dir = tempfile.mkdtemp(prefix="databricks_cli_")
-        logger.info(f"📁 Created temporary CLI directory: {temp_cli_dir}")
+        Returns:
+            Operation results with logs
+        """
+        logs = []
+        temp_dir = None
         
         try:
-            # Download CLI
-            zip_path = os.path.join(temp_cli_dir, "databricks.zip")
-            logger.info(f"🌐 Downloading CLI from: {cli_url}")
+            # Create temporary directory for git clone
+            temp_dir = tempfile.mkdtemp(prefix=f"bundle_{operation_id}_")
+            logs.append(f"📁 Created temporary directory: {temp_dir}")
             
-            response = requests.get(cli_url, timeout=120)
-            response.raise_for_status()
+            # Step 1: Git Clone
+            git_url = git_params.get('git_url')
+            git_branch = git_params.get('git_branch', 'main')
             
-            with open(zip_path, 'wb') as f:
-                f.write(response.content)
+            if not git_url:
+                raise Exception("Git URL not found in configuration")
             
-            logger.info(f"✅ CLI downloaded successfully ({len(response.content)} bytes)")
+            # Handle authentication if git connection provided
+            if git_connection:
+                git_config = git_connection.get('configuration', {})
+                token = git_config.get('personal_access_token')
+                if token:
+                    # Use authenticated URL
+                    if 'github.com' in git_url:
+                        git_url = git_url.replace('https://', f'https://{token}@')
+                    logs.append(f"🔐 Using authenticated git URL")
             
-            # Extract CLI
-            logger.info("📦 Extracting CLI...")
-            result = subprocess.run(
-                ["unzip", "-q", zip_path, "-d", temp_cli_dir],
-                capture_output=True, text=True, timeout=30
+            # Execute git clone
+            clone_cmd = f"git clone {git_url} --depth 1 --branch {git_branch} {temp_dir}"
+            logs.append(f"🌿 Executing: {clone_cmd}")
+            
+            clone_result = subprocess.run(
+                clone_cmd, shell=True, capture_output=True, text=True, timeout=300
             )
             
-            if result.returncode != 0:
-                logger.error(f"❌ Failed to extract CLI: {result.stderr}")
-                return False
+            if clone_result.returncode != 0:
+                raise Exception(f"Git clone failed: {clone_result.stderr}")
             
-            # Set executable permissions (CLI binary name may vary)
-            cli_binary_name = "databricks"
-            cli_path = os.path.join(temp_cli_dir, cli_binary_name)
+            logs.append("✅ Git clone completed successfully")
             
-            # Check if the standard binary exists, if not, look for alternatives
-            if not os.path.exists(cli_path):
-                # Check for other possible binary names
-                possible_names = ["databricks", f"databricks_cli_{version}_linux_amd64", f"databricks_cli_{version}_darwin_amd64"]
-                for name in possible_names:
-                    test_path = os.path.join(temp_cli_dir, name)
-                    if os.path.exists(test_path):
-                        cli_path = test_path
-                        break
+            # Step 2: Navigate to yaml file directory
+            yaml_path = databricks_params.get('yaml_path', '')
+            if yaml_path:
+                # Extract directory from yaml path
+                yaml_dir = os.path.dirname(yaml_path)
+                if yaml_dir:
+                    work_dir = os.path.join(temp_dir, yaml_dir)
+                    if os.path.exists(work_dir):
+                        os.chdir(work_dir)
+                        logs.append(f"📂 Changed to directory: {work_dir}")
+                    else:
+                        logs.append(f"⚠️ Directory not found: {work_dir}, using root")
                 else:
-                    # List files in directory for debugging
-                    files = os.listdir(temp_cli_dir)
-                    logger.error(f"❌ CLI binary not found. Available files: {files}")
-                    return False
-            
-            os.chmod(cli_path, 0o755)
-            logger.info(f"🔧 CLI ready at: {cli_path}")
-            
-            # Test CLI
-            version_result = subprocess.run(
-                [cli_path, "version"], capture_output=True, text=True, timeout=30, env=env_vars
-            )
-            
-            if version_result.returncode == 0:
-                logger.info(f"✅ Modern CLI version: {version_result.stdout.strip()}")
+                    work_dir = temp_dir
+                    os.chdir(work_dir)
+                    logs.append(f"📂 Using root directory: {work_dir}")
             else:
-                logger.warning(f"⚠️ CLI version check failed: {version_result.stderr}")
+                work_dir = temp_dir
+                os.chdir(work_dir)
+                logs.append(f"📂 Using root directory: {work_dir}")
             
-            # Execute bundle operation
-            logger.info(f"🚀 Executing bundle {operation} with downloaded CLI...")
+            # Step 3: Execute databricks bundle command
+            target_env = databricks_params.get('target_environment', 'dev')
             
-            # Create a hardcoded databricks.yml for testing
-            hardcoded_yaml_path = os.path.join(temp_cli_dir, "databricks.yml")
-            hardcoded_yaml_content = f"""bundle:
-  name: test_bundle
-  
-targets:
-  {target_env}:
-    mode: development
-    workspace:
-      host: {env_vars.get('DATABRICKS_HOST', 'https://dbc-3da7f034-dce2.cloud.databricks.com')}
-    
-resources:
-  jobs:
-    test_job:
-      name: "Test Bundle Job - ${{bundle.target}}"
-      tasks:
-        - task_key: "main_task"
-          python_wheel_task:
-            package_name: "my_package"
-            entry_point: "main"
-          new_cluster:
-            spark_version: "13.3.x-scala2.12"
-            node_type_id: "i3.xlarge"
-            num_workers: 1
-"""
+            if operation_type == "validate":
+                bundle_cmd = f"databricks bundle validate -t {target_env}"
+            elif operation_type == "deploy":
+                bundle_cmd = f"databricks bundle deploy -t {target_env}"
+            else:
+                bundle_cmd = f"databricks bundle {operation_type} -t {target_env}"
             
-            with open(hardcoded_yaml_path, 'w') as f:
-                f.write(hardcoded_yaml_content)
+            logs.append(f"🚀 Executing: {bundle_cmd}")
             
-            logger.info(f"📋 Created hardcoded databricks.yml for testing:")
-            logger.info(f"   Host: {env_vars.get('DATABRICKS_HOST', 'https://dbc-3da7f034-dce2.cloud.databricks.com')}")
-            logger.info(f"   Target: {target_env}")
-            logger.info(f"   Config file: {hardcoded_yaml_path}")
-            
-            bundle_cmd = [cli_path, "bundle", operation]
-            
-            if target_env:
-                bundle_cmd.extend(["-t", target_env])
-            
-            logger.info(f"Executing: {' '.join(bundle_cmd)}")
-            
-            # Set up environment
+            # Set databricks environment variables if connection provided
             env = os.environ.copy()
-            env.update(env_vars)
+            if databricks_connection:
+                db_config = databricks_connection.get('configuration', {})
+                host = db_config.get('databricks_instance_url') or db_config.get('host')
+                token = db_config.get('personal_access_token') or db_config.get('token')
+                
+                if host:
+                    env['DATABRICKS_HOST'] = host.replace('https://', '').replace('http://', '')
+                if token:
+                    env['DATABRICKS_TOKEN'] = token
+                
+                logs.append(f"🔧 Using Databricks connection: {databricks_connection.get('connection_name')}")
             
             bundle_result = subprocess.run(
-                bundle_cmd, capture_output=True, text=True, timeout=600,
-                cwd=temp_cli_dir, env=env
+                bundle_cmd, shell=True, capture_output=True, text=True, timeout=600, env=env
             )
             
-            if bundle_result.returncode == 0:
-                logger.info("✅ Bundle operation completed successfully with downloaded CLI!")
-                if bundle_result.stdout:
-                    logger.info(f"📄 CLI Output:\n{bundle_result.stdout}")
-                return True
-            else:
-                logger.error(f"❌ Bundle operation failed with return code: {bundle_result.returncode}")
-                if bundle_result.stderr:
-                    logger.error(f"CLI Error: {bundle_result.stderr}")
-                if bundle_result.stdout:
-                    logger.error(f"CLI Output: {bundle_result.stdout}")
-                return False
-                
+            if bundle_result.returncode != 0:
+                logs.append(f"❌ Bundle operation failed: {bundle_result.stderr}")
+                return {
+                    'success': False,
+                    'logs': logs,
+                    'stdout': bundle_result.stdout,
+                    'stderr': bundle_result.stderr,
+                    'return_code': bundle_result.returncode
+                }
+            
+            logs.append("✅ Bundle operation completed successfully")
+            logs.append(f"📄 Output: {bundle_result.stdout}")
+            
+            return {
+                'success': True,
+                'logs': logs,
+                'stdout': bundle_result.stdout,
+                'stderr': bundle_result.stderr,
+                'return_code': bundle_result.returncode,
+                'work_directory': work_dir
+            }
+            
+        except subprocess.TimeoutExpired:
+            logs.append("⏰ Operation timed out")
+            return {
+                'success': False,
+                'logs': logs,
+                'error': 'Operation timed out'
+            }
+        except Exception as e:
+            logs.append(f"❌ Operation failed: {str(e)}")
+            return {
+                'success': False,
+                'logs': logs,
+                'error': str(e)
+            }
         finally:
             # Cleanup temporary directory
-            try:
-                shutil.rmtree(temp_cli_dir)
-                logger.info(f"🧹 Cleaned up temporary CLI directory: {temp_cli_dir}")
-            except Exception as cleanup_error:
-                logger.warning(f"⚠️ Failed to cleanup temp directory: {cleanup_error}")
-        
-    except Exception as e:
-        logger.error(f"❌ CLI download and execution failed: {str(e)}")
-        return False
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logs.append(f"🧹 Cleaned up temporary directory: {temp_dir}")
+                except Exception as e:
+                    logs.append(f"⚠️ Failed to cleanup temporary directory: {str(e)}")
 
-def execute_hardcoded_yaml_test(yaml_content: str, target_env: str, env_vars: Dict[str, str]) -> bool:
+
+def get_bundle_operations(databricks_host: str = None, databricks_token: str = None) -> DatabricksBundleOperations:
     """
-    Test bundle validation using a hardcoded, known-good YAML configuration
+    Factory function to create DatabricksBundleOperations instance
     
     Args:
-        yaml_content: Original bundle YAML content (for reference)
-        target_env: Target environment
-        env_vars: Environment variables
+        databricks_host: Databricks workspace host
+        databricks_token: Databricks API token
         
     Returns:
-        True if test successful, False otherwise
+        DatabricksBundleOperations instance
     """
-    try:
-        logger.info("🧪 Testing with hardcoded databricks.yml configuration...")
-        
-        # Create a simple, valid hardcoded YAML for testing
-        hardcoded_yaml = f"""
-bundle:
-  name: test-bundle-validation
-  
-targets:
-  {target_env}:
-    workspace:
-      host: {env_vars.get('DATABRICKS_HOST', 'https://dbc-3da7f034-dce2.cloud.databricks.com')}
-    
-variables:
-  test_var:
-    default: "test_value"
-
-resources:
-  jobs:
-    test_job:
-      name: "Test Bundle Validation Job"
-      max_concurrent_runs: 1
-      timeout_seconds: 3600
-      tasks:
-        - task_key: "test_task"
-          notebook_task:
-            notebook_path: "/Workspace/Users/test/test_notebook"
-          new_cluster:
-            spark_version: "14.3.x-scala2.12"
-            node_type_id: "i3.xlarge"
-            num_workers: 1
-"""
-
-        logger.info("📄 Hardcoded YAML content:")
-        for i, line in enumerate(hardcoded_yaml.strip().split('\n'), 1):
-            logger.info(f"   {i:2d}: {line}")
-        
-        # Parse the hardcoded YAML to validate structure
-        try:
-            # Skip PyYAML dependency - use string-based validation instead
-            logger.info("🔧 Using string-based validation (no PyYAML dependency)")
-            parsed_yaml = {
-                'bundle': {'name': 'test-bundle-validation'},
-                'targets': {target_env: {'workspace': {'host': env_vars.get('DATABRICKS_HOST', 'unknown')}}},
-                'resources': {'jobs': {'test_job': {'tasks': [{'task_key': 'test_task'}]}}}
-            }
-            logger.info("✅ Hardcoded YAML parsed successfully")
-            
-            # Validate required sections
-            required_sections = ['bundle', 'targets', 'resources']
-            for section in required_sections:
-                if section in parsed_yaml:
-                    logger.info(f"✅ Found required section: {section}")
-                else:
-                    logger.error(f"❌ Missing required section: {section}")
-                    return False
-            
-            # Validate target environment
-            if target_env in parsed_yaml.get('targets', {}):
-                logger.info(f"✅ Target environment '{target_env}' found in configuration")
-            else:
-                logger.error(f"❌ Target environment '{target_env}' not found")
-                return False
-            
-            # Validate workspace configuration
-            workspace_config = parsed_yaml.get('targets', {}).get(target_env, {}).get('workspace', {})
-            if 'host' in workspace_config:
-                logger.info(f"✅ Workspace host configured: {workspace_config['host']}")
-            else:
-                logger.warning("⚠️ No workspace host found in target config")
-            
-            # Validate resources
-            resources = parsed_yaml.get('resources', {})
-            if 'jobs' in resources:
-                jobs = resources['jobs']
-                logger.info(f"✅ Found {len(jobs)} job(s) in resources")
-                for job_name, job_config in jobs.items():
-                    logger.info(f"   📋 Job: {job_name}")
-                    if 'tasks' in job_config:
-                        logger.info(f"      ✅ Job has {len(job_config['tasks'])} task(s)")
-                    else:
-                        logger.warning(f"      ⚠️ Job missing tasks configuration")
-            else:
-                logger.warning("⚠️ No jobs found in resources")
-            
-            logger.info("✅ Hardcoded YAML validation test PASSED!")
-            logger.info("🎯 Bundle structure is valid and ready for deployment")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ YAML parsing error: {str(e)}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ Hardcoded YAML test failed: {str(e)}")
-        return False
-
-def execute_bundle_validation(yaml_content: str, target_env: str, env_vars: Dict[str, str]) -> bool:
-    """
-    Execute bundle validation using string parsing (no SDK)
-    
-    Args:
-        yaml_content: Bundle YAML content
-        target_env: Target environment
-        env_vars: Environment variables
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        logger.info("🔍 Performing REAL bundle validation via Databricks API...")
-        
-        # Get authentication details
-        workspace_url = f"https://{env_vars.get('DATABRICKS_HOST')}"
-        client_id = env_vars.get('DATABRICKS_CLIENT_ID')
-        client_secret = env_vars.get('DATABRICKS_CLIENT_SECRET')
-        token = env_vars.get('DATABRICKS_TOKEN')
-        
-        logger.info(f"🔗 Target workspace: {workspace_url}")
-        
-        # Get access token
-        headers = {}
-        if token:
-            headers['Authorization'] = f'Bearer {token}'
-            logger.info("🔐 Using Personal Access Token for API authentication")
-        elif client_id and client_secret:
-            logger.info("🔐 Getting OAuth token using Service Principal...")
-            logger.info(f"🔗 Token URL: {workspace_url}/oidc/v1/token")
-            logger.info(f"🔑 Client ID length: {len(client_id) if client_id else 0}")
-            logger.info(f"🔑 Client Secret length: {len(client_secret) if client_secret else 0}")
-            
-            import requests
-            
-            token_url = f"{workspace_url}/oidc/v1/token"
-            token_response = requests.post(token_url, data={
-                'grant_type': 'client_credentials',
-                'client_id': client_id,
-                'client_secret': client_secret
-            }, timeout=30)
-            
-            if token_response.status_code != 200:
-                logger.error(f"❌ Failed to get OAuth token: {token_response.text}")
-                logger.info("🔄 Falling back to hardcoded YAML validation test...")
-                return execute_hardcoded_yaml_test(yaml_content, target_env, env_vars)
-                
-            access_token = token_response.json()['access_token']
-            headers['Authorization'] = f'Bearer {access_token}'
-            logger.info("✅ OAuth token obtained successfully")
-        else:
-            logger.error("❌ No valid authentication method found")
-            logger.info("🔄 Falling back to hardcoded YAML validation test...")
-            return execute_hardcoded_yaml_test(yaml_content, target_env, env_vars)
-        
-        # Test workspace connectivity
-        logger.info("🔧 Testing workspace connectivity...")
-        headers['Content-Type'] = 'application/json'
-        
-        import requests
-        workspace_test_url = f"{workspace_url}/api/2.0/workspace/list"
-        test_response = requests.get(workspace_test_url, headers=headers, params={'path': '/'}, timeout=30)
-        
-        logger.info(f"📊 Workspace test response: {test_response.status_code}")
-        
-        if test_response.status_code != 200:
-            logger.error(f"❌ Workspace connectivity failed: {test_response.text}")
-            return False
-        
-        logger.info("✅ Workspace connectivity verified!")
-        
-        # Parse YAML and validate by creating a test job
-        try:
-            import yaml
-            bundle_config = yaml.safe_load(yaml_content)
-            logger.info("✅ Bundle YAML parsed successfully")
-            
-            # Extract job configuration from bundle
-            resources = bundle_config.get('resources', {})
-            jobs = resources.get('jobs', {})
-            
-            if jobs:
-                # Take the first job for validation
-                job_name, job_config = next(iter(jobs.items()))
-                logger.info(f"🔧 Validating job configuration via Databricks Jobs API: {job_name}")
-                
-                # Create a test job payload
-                test_job_payload = {
-                    'name': f"VALIDATION-TEST-{job_name}-{target_env}",
-                    'tasks': job_config.get('tasks', []),
-                    'timeout_seconds': 3600,
-                    'max_concurrent_runs': 1
-                }
-                
-                # Call Jobs API to validate the configuration
-                jobs_url = f"{workspace_url}/api/2.1/jobs/create"
-                logger.info("🚀 Creating test job to validate bundle configuration...")
-                
-                validation_response = requests.post(jobs_url, headers=headers, json=test_job_payload, timeout=60)
-                logger.info(f"📊 Job validation response: {validation_response.status_code}")
-                
-                if validation_response.status_code == 200:
-                    job_data = validation_response.json()
-                    job_id = job_data.get('job_id')
-                    logger.info(f"✅ Bundle validation successful! Test job created: {job_id}")
-                    
-                    # Clean up test job immediately
-                    if job_id:
-                        logger.info("🧹 Cleaning up test job...")
-                        delete_url = f"{workspace_url}/api/2.1/jobs/delete"
-                        delete_payload = {'job_id': job_id}
-                        delete_response = requests.post(delete_url, headers=headers, json=delete_payload, timeout=30)
-                        if delete_response.status_code == 200:
-                            logger.info("✅ Test job cleaned up successfully")
-                        else:
-                            logger.warning(f"⚠️ Failed to clean up test job: {delete_response.text}")
-                    
-                    logger.info("✅ REAL Bundle validation completed successfully via Databricks API!")
-                    return True
-                else:
-                    logger.error(f"❌ Bundle validation failed via Jobs API: {validation_response.text}")
-                    return False
-            else:
-                logger.warning("⚠️ No jobs found in bundle, checking basic structure...")
-                # Basic structure validation
-                if 'bundle' in bundle_config and 'targets' in bundle_config:
-                    logger.info("✅ Bundle has basic structure (bundle + targets)")
-                    return True
-                else:
-                    logger.error("❌ Bundle missing required structure")
-                    return False
-                
-        except Exception as yaml_error:
-            logger.error(f"❌ YAML parsing/validation error: {str(yaml_error)}")
-            return False
-        
-    except Exception as e:
-        logger.error(f"❌ Validation failed: {str(e)}")
-        return False
-
-# Main execution  
-if __name__ == "__main__":
-    """Main execution function"""
-    
-    # Parse command line arguments  
-    args = parse_arguments()
-    
-    # Set up logging level
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.12)")
-    logger.info(f"Operation: {args.operation}")
-    logger.info(f"Target Environment: {args.target_env}")
-    
-    # Get values from arguments or environment variables
-    git_url = args.git_url
-    git_branch = args.git_branch
-    git_token = args.git_token
-    yaml_path = args.yaml_path
-    operation = args.operation
-    target_env = args.target_env
-    databricks_host = args.databricks_host
-    databricks_token = args.databricks_token
-    databricks_client_id = args.databricks_client_id
-    databricks_client_secret = args.databricks_client_secret
-    
-    # Parse connection configurations if provided
-    git_config = {}
-    db_config = {}
-    
-    if args.git_connection_config:
-        git_config = parse_connection_config(args.git_connection_config)
-        logger.info("🔧 Using Git config from connection config")
-        
-        # Use token from connection config if not provided
-        if not git_token and git_config.get('token'):
-            git_token = git_config['token']
-            logger.info("🔐 Using Git token from connection config")
-        if not git_token and git_config.get('personal_access_token'):
-            git_token = git_config['personal_access_token']
-            logger.info("🔐 Using Git token from connection config")
-    
-    if args.databricks_connection_config:
-        db_config = parse_connection_config(args.databricks_connection_config)
-        logger.info("🔧 Using Databricks config from connection config")
-    
-    # Setup Databricks authentication
-    env_vars = setup_databricks_authentication(db_config, databricks_host, databricks_token, databricks_client_id, databricks_client_secret)
-    if not env_vars:
-        logger.error("❌ Failed to setup Databricks authentication")
-        sys.exit(1)
-    
-    # Validate required parameters
-    if not git_url:
-        logger.error("❌ Git URL is required")
-        sys.exit(1)
-    
-    if not yaml_path:
-        logger.error("❌ YAML path is required")
-        sys.exit(1)
-    
-    # Create temporary directory
-    temp_dir = tempfile.mkdtemp(prefix=f"bundle_{operation}_")
-    logger.info(f"📁 Created temporary directory: {temp_dir}")
-    
-    try:
-        # Step 1: Execute git clone
-        if not execute_git_clone(git_url, git_branch, git_token, temp_dir):
-            logger.error("❌ Git clone failed")
-            sys.exit(1)
-        
-        # Step 2: Navigate to yaml file directory
-        yaml_dir = os.path.dirname(yaml_path)
-        if yaml_dir:
-            work_dir = os.path.join(temp_dir, yaml_dir)
-            if os.path.exists(work_dir):
-                logger.info(f"📂 Changed to directory: {work_dir}")
-            else:
-                logger.warning(f"⚠️ Directory not found: {work_dir}, using root")
-                work_dir = temp_dir
-        else:
-            work_dir = temp_dir
-            logger.info(f"📂 Using root directory: {work_dir}")
-        
-        # Step 3: Execute bundle operation
-        if not execute_bundle_operation(operation, target_env, work_dir, env_vars):
-            logger.error("❌ Bundle operation failed")
-            sys.exit(1)
-        
-        logger.info("✅ Bundle operation completed successfully!")
-        
-    finally:
-        # Cleanup
-        try:
-            shutil.rmtree(temp_dir)
-            logger.info(f"🧹 Cleaned up temporary directory: {temp_dir}")
-        except Exception as cleanup_error:
-            logger.warning(f"⚠️ Failed to cleanup temp directory: {cleanup_error}")
+    return DatabricksBundleOperations(databricks_host=databricks_host, databricks_token=databricks_token)
