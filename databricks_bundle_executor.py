@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Databricks Bundle Executor Script
+Databricks Bundle Executor Script - Updated for Service Principal Support
 
 This script is designed to be executed via Spark Task Manager to perform
 databricks bundle operations (git clone + bundle validate/deploy).
 
-It expects parameters to be passed via command line arguments or environment variables.
+It supports both Personal Access Token and Service Principal authentication.
 
 Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 1.0
+Version: 2.0 - Added Service Principal Support
 """
 
 import os
@@ -75,6 +75,55 @@ def parse_connection_config(config_json: str) -> Dict[str, Any]:
         logger.warning(f"Failed to parse connection config: {e}")
     return {}
 
+def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: Optional[str], databricks_token: Optional[str]) -> Dict[str, str]:
+    """
+    Setup Databricks authentication based on connection configuration
+    
+    Args:
+        db_config: Databricks connection configuration
+        databricks_host: Databricks host from arguments
+        databricks_token: Databricks token from arguments
+        
+    Returns:
+        Dictionary of environment variables to set
+    """
+    env_vars = {}
+    
+    # Get host
+    host = databricks_host or db_config.get('workspace_url') or db_config.get('databricks_instance_url')
+    if host:
+        env_vars['DATABRICKS_HOST'] = host.replace('https://', '').replace('http://', '')
+        logger.info(f"🔧 Using Databricks host: {host}")
+    
+    # Determine authentication type
+    auth_type = db_config.get('authentication_type', 'personal_access_token')
+    
+    if auth_type == 'service_principal':
+        # Service Principal authentication
+        client_id = db_config.get('client_id')
+        client_secret = db_config.get('secret')
+        
+        if client_id and client_secret:
+            env_vars['DATABRICKS_CLIENT_ID'] = client_id
+            env_vars['DATABRICKS_CLIENT_SECRET'] = client_secret
+            logger.info("🔧 Using Service Principal authentication")
+            logger.info(f"   Client ID: {client_id[:10]}...")
+        else:
+            logger.error("❌ Service Principal authentication requires client_id and secret")
+            return {}
+    else:
+        # Personal Access Token authentication
+        token = databricks_token or db_config.get('personal_access_token') or db_config.get('token')
+        if token:
+            env_vars['DATABRICKS_TOKEN'] = token
+            logger.info("🔧 Using Personal Access Token authentication")
+            logger.info(f"   Token: {token[:10]}...")
+        else:
+            logger.error("❌ Personal Access Token authentication requires token")
+            return {}
+    
+    return env_vars
+
 def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], temp_dir: str) -> bool:
     """
     Execute git clone operation
@@ -133,7 +182,7 @@ def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], t
         return False
 
 def execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
-                           databricks_host: Optional[str], databricks_token: Optional[str]) -> bool:
+                           env_vars: Dict[str, str]) -> bool:
     """
     Execute databricks bundle operation
     
@@ -141,8 +190,7 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         operation: Bundle operation (validate, deploy, etc.)
         target_env: Target environment
         work_dir: Working directory
-        databricks_host: Databricks workspace host
-        databricks_token: Databricks access token
+        env_vars: Environment variables for Databricks authentication
         
     Returns:
         True if successful, False otherwise
@@ -151,6 +199,7 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         logger.info(f"🚀 Starting databricks bundle {operation} operation")
         logger.info(f"   Target Environment: {target_env}")
         logger.info(f"   Working Directory: {work_dir}")
+        logger.info(f"   Authentication: {list(env_vars.keys())}")
         
         # Build bundle command
         bundle_cmd = f"databricks bundle {operation} -t {target_env}"
@@ -158,13 +207,7 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         
         # Set up environment variables
         env = os.environ.copy()
-        if databricks_host:
-            env['DATABRICKS_HOST'] = databricks_host.replace('https://', '').replace('http://', '')
-            logger.info(f"🔧 Using Databricks host: {databricks_host}")
-        
-        if databricks_token:
-            env['DATABRICKS_TOKEN'] = databricks_token
-            logger.info("🔧 Using Databricks token")
+        env.update(env_vars)
         
         # Execute bundle command
         bundle_result = subprocess.run(
@@ -200,7 +243,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v2.0)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
@@ -215,6 +258,9 @@ def main():
         operation = args.operation
         
         # Parse connection configurations if provided
+        git_config = {}
+        db_config = {}
+        
         if args.git_connection_config:
             git_config = parse_connection_config(args.git_connection_config)
             if not git_token and git_config.get('personal_access_token'):
@@ -223,11 +269,13 @@ def main():
         
         if args.databricks_connection_config:
             db_config = parse_connection_config(args.databricks_connection_config)
-            if not databricks_host and db_config.get('databricks_instance_url'):
-                databricks_host = db_config['databricks_instance_url']
-            if not databricks_token and db_config.get('personal_access_token'):
-                databricks_token = db_config['personal_access_token']
             logger.info("🔧 Using Databricks config from connection config")
+        
+        # Setup Databricks authentication
+        env_vars = setup_databricks_authentication(db_config, databricks_host, databricks_token)
+        if not env_vars:
+            logger.error("❌ Failed to setup Databricks authentication")
+            sys.exit(1)
         
         # Validate required parameters
         if not git_url:
@@ -262,7 +310,7 @@ def main():
                 logger.info(f"📂 Using root directory: {work_dir}")
             
             # Step 3: Execute bundle operation
-            if not execute_bundle_operation(operation, target_env, work_dir, databricks_host, databricks_token):
+            if not execute_bundle_operation(operation, target_env, work_dir, env_vars):
                 logger.error("❌ Bundle operation failed")
                 sys.exit(1)
             
