@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 7.3 - No PyYAML Dependency Success
+Version: 8.0 - Pure Databricks CLI Only (No Fallbacks)
 """
 
 import os
@@ -259,17 +259,21 @@ def download_and_setup_cli(tmp_dir: str) -> str:
         import platform
         system = platform.system().lower()
         
+        # Use specific version to avoid GitHub redirect issues
         if system == "darwin":
-            cli_url = "https://github.com/databricks/cli/releases/latest/download/databricks_darwin_amd64.zip"
+            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_darwin_amd64.zip"
         elif system == "linux":
-            cli_url = "https://github.com/databricks/cli/releases/latest/download/databricks_linux_amd64.zip"
+            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_linux_amd64.zip"
         else:
             raise Exception(f"Unsupported platform: {system}")
         
         download_cmd = [
             "curl", "-L", "-o", zip_path, 
             "--user-agent", "databricks-bundle-executor/1.0",
-            "--location-trusted", cli_url
+            "--location-trusted",
+            "--connect-timeout", "30",
+            "--max-time", "300",
+            cli_url
         ]
         
         logger.info(f"Executing: {' '.join(download_cmd)}")
@@ -337,8 +341,9 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
             # Download and setup Databricks CLI
             cli_path = download_and_setup_cli(cli_tmp_dir)
             if not cli_path:
-                logger.error("❌ Failed to setup Databricks CLI")
-                return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
+                logger.error("❌ FAILED: Databricks CLI is required but setup failed")
+                logger.error("❌ This script only supports CLI-based bundle operations")
+                return False
             
             # Test CLI execution
             logger.info("🔧 Testing Databricks CLI...")
@@ -378,9 +383,10 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
                 if bundle_result.stdout:
                     logger.error(f"CLI Output: {bundle_result.stdout}")
                 
-                # If CLI fails, try REST API approach
-                logger.info("🔄 Downloaded CLI failed, trying REST API approach...")
-                return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
+                # CLI-only approach - no fallbacks
+                logger.error("❌ FAILED: CLI command failed and no fallbacks available")
+                logger.error("❌ This script only supports CLI-based bundle operations")
+                return False
                 
         finally:
             # Cleanup CLI temporary directory
@@ -395,7 +401,8 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         return False
     except Exception as e:
         logger.error(f"❌ Bundle operation failed: {str(e)}")
-        return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
+        logger.error("❌ CLI-only approach - no fallbacks available")
+        return False
 
 def execute_bundle_operation_sdk(operation: str, target_env: str, work_dir: str, 
                                env_vars: Dict[str, str]) -> bool:
@@ -829,7 +836,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v7.3)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.0)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
