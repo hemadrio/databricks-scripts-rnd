@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.5 - CLI with Modern CLI Download Fallback
+Version: 8.7 - CLI with v0.264.2 Download (Fixed URLs)
 """
 
 import os
@@ -564,12 +564,13 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
     try:
         logger.info("📥 Downloading modern Databricks CLI with bundle support...")
         
-        # Determine platform and download URL
+        # Determine platform and download URL (using latest confirmed version v0.264.2)
+        version = "0.264.2"
         system = platform.system().lower()
         if system == "linux":
-            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_linux_amd64.zip"
+            cli_url = f"https://github.com/databricks/cli/releases/download/v{version}/databricks_cli_{version}_linux_amd64.zip"
         elif system == "darwin":
-            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_darwin_amd64.zip"
+            cli_url = f"https://github.com/databricks/cli/releases/download/v{version}/databricks_cli_{version}_darwin_amd64.zip"
         else:
             logger.error(f"❌ Unsupported platform: {system}")
             return False
@@ -602,8 +603,25 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
                 logger.error(f"❌ Failed to extract CLI: {result.stderr}")
                 return False
             
-            # Set executable permissions
-            cli_path = os.path.join(temp_cli_dir, "databricks")
+            # Set executable permissions (CLI binary name may vary)
+            cli_binary_name = "databricks"
+            cli_path = os.path.join(temp_cli_dir, cli_binary_name)
+            
+            # Check if the standard binary exists, if not, look for alternatives
+            if not os.path.exists(cli_path):
+                # Check for other possible binary names
+                possible_names = ["databricks", f"databricks_cli_{version}_linux_amd64", f"databricks_cli_{version}_darwin_amd64"]
+                for name in possible_names:
+                    test_path = os.path.join(temp_cli_dir, name)
+                    if os.path.exists(test_path):
+                        cli_path = test_path
+                        break
+                else:
+                    # List files in directory for debugging
+                    files = os.listdir(temp_cli_dir)
+                    logger.error(f"❌ CLI binary not found. Available files: {files}")
+                    return False
+            
             os.chmod(cli_path, 0o755)
             logger.info(f"🔧 CLI ready at: {cli_path}")
             
@@ -921,7 +939,7 @@ if __name__ == "__main__":
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.5)")
+    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.7)")
     logger.info(f"Operation: {args.operation}")
     logger.info(f"Target Environment: {args.target_env}")
     
