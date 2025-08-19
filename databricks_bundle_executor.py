@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 6.4 - Prioritized Non-Interactive CLI Approach
+Version: 6.6 - Added Serverless Compute Support
 """
 
 import os
@@ -183,6 +183,63 @@ def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], t
         logger.error(f"❌ Git clone operation failed: {str(e)}")
         return False
 
+def create_databricks_config(env_vars: Dict[str, str]) -> str:
+    """
+    Create a temporary .databrickscfg file for non-interactive authentication
+    
+    Args:
+        env_vars: Environment variables for Databricks authentication
+        
+    Returns:
+        Path to the created config file
+    """
+    try:
+        import tempfile
+        import os
+        
+        # Create temporary config file
+        config_fd, config_path = tempfile.mkstemp(suffix='.databrickscfg', prefix='databricks_')
+        
+        # Determine authentication method
+        host = env_vars.get('DATABRICKS_HOST')
+        token = env_vars.get('DATABRICKS_TOKEN')
+        client_id = env_vars.get('DATABRICKS_CLIENT_ID')
+        client_secret = env_vars.get('DATABRICKS_CLIENT_SECRET')
+        
+        config_content = "[DEFAULT]\n"
+        
+        if host:
+            config_content += f"host = https://{host}\n"
+        
+        if token:
+            # Personal Access Token authentication
+            config_content += f"token = {token}\n"
+        elif client_id and client_secret:
+            # Service Principal authentication
+            config_content += f"client_id = {client_id}\n"
+            config_content += f"client_secret = {client_secret}\n"
+        
+        # Add serverless compute configuration
+        config_content += "serverless_compute_id = auto\n"
+        
+        # Write config file
+        with os.fdopen(config_fd, 'w') as f:
+            f.write(config_content)
+        
+        logger.info(f"📝 Created Databricks config file: {config_path}")
+        logger.info(f"📋 Config content preview:")
+        for line in config_content.split('\n'):
+            if line and not any(secret in line.lower() for secret in ['token', 'secret']):
+                logger.info(f"   {line}")
+            elif line:
+                logger.info(f"   {line.split('=')[0]}= ***REDACTED***")
+        
+        return config_path
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to create Databricks config: {str(e)}")
+        return None
+
 def execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
                            env_vars: Dict[str, str]) -> bool:
     """
@@ -225,29 +282,36 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         env = os.environ.copy()
         env.update(env_vars)
         
-        # Add non-interactive environment variables
+        # Add serverless and non-interactive environment variables
         env.update({
             'DATABRICKS_CLI_FORCE_NONINTERACTIVE': '1',
             'DATABRICKS_CLI_NONINTERACTIVE': '1',
             'DATABRICKS_CLI_BATCH_MODE': '1',
+            'DATABRICKS_SERVERLESS_COMPUTE_ID': 'auto',  # Critical for serverless compute
             'CI': 'true',  # Continuous Integration mode
             'DEBIAN_FRONTEND': 'noninteractive',
             'TERM': 'dumb'
         })
         
-        # Try CLI with non-interactive approach first (as requested)
-        logger.info("🔧 Attempting Databricks CLI with non-interactive approach first...")
+        # Create Databricks config file for serverless authentication
+        config_path = create_databricks_config(env_vars)
+        if config_path:
+            env['DATABRICKS_CONFIG_FILE'] = config_path
+            logger.info(f"🔧 Using Databricks config file: {config_path}")
         
-        # Approach 1: Try with non-interactive flags (PRIORITY)
-        logger.info("🔧 Approach 1: Using non-interactive mode...")
+        # Try CLI with serverless and non-interactive approach first
+        logger.info("🔧 Attempting Databricks CLI with serverless non-interactive approach...")
         
-        # Try different non-interactive approaches
+        # Approach 1: Try with serverless-specific flags (PRIORITY)
+        logger.info("🔧 Approach 1: Using serverless non-interactive mode...")
+        
+        # Try different serverless non-interactive approaches
         noninteractive_attempts = [
-            f"databricks bundle {operation} -t {target_env} --output json --no-interactive",
-            f"databricks bundle {operation} -t {target_env} --output json --non-interactive",
-            f"databricks bundle {operation} -t {target_env} --output json --batch",
-            f"databricks bundle {operation} -t {target_env} --output json --quiet",
-            f"databricks bundle {operation} -t {target_env} --output json"
+            f"databricks bundle {operation} -t {target_env} --output json",  # Basic command first
+            f"databricks bundle {operation} -t {target_env} --output text",   # Try text output
+            f"databricks bundle {operation} -t {target_env}",                # Minimal command
+            f"DATABRICKS_CLI_CONFIGURE_TOKEN='' databricks bundle {operation} -t {target_env} --output json",  # Force no config prompt
+            f"echo '' | databricks bundle {operation} -t {target_env} --output json"  # Pipe empty input
         ]
         
         for i, cmd in enumerate(noninteractive_attempts, 1):
@@ -596,7 +660,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v6.4)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v6.6)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
