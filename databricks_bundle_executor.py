@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.1 - CLI Environment Inspection (No Download)
+Version: 8.2 - Fixed CLI Path Detection + Environment
 """
 
 import os
@@ -442,12 +442,16 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
             cli_path = None
             
             for path, status in inspection_results.get('cli_paths', {}).items():
-                if status == 'found' or (isinstance(status, str) and status not in ['not_found', 'error']):
+                if path == 'which_databricks' and status != 'not found':
+                    # Use the path returned by 'which' command - this is most reliable
                     cli_found = True
-                    if path == 'which_databricks':
-                        cli_path = status  # The actual path from 'which'
-                    else:
-                        cli_path = path
+                    cli_path = status  # The actual path from 'which'
+                    logger.info(f"✅ Found working CLI via 'which': {cli_path}")
+                    break
+                elif status == 'found' and path != 'which_databricks':
+                    # Fallback to direct path checks
+                    cli_found = True
+                    cli_path = path
                     logger.info(f"✅ Found working CLI at: {cli_path}")
                     break
             
@@ -456,8 +460,17 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
                 logger.error("❌ This script requires an existing CLI installation")
                 return False
             
-            # Test CLI execution
+            # Test CLI execution and verify environment
             logger.info("🔧 Testing Databricks CLI...")
+            logger.info(f"🔑 Environment variables being passed to CLI:")
+            for key in ['DATABRICKS_HOST', 'DATABRICKS_CLIENT_ID', 'DATABRICKS_CLIENT_SECRET']:
+                value = env.get(key, 'NOT SET')
+                if value != 'NOT SET' and len(value) > 8:
+                    display_value = f"{value[:8]}..."
+                else:
+                    display_value = value
+                logger.info(f"   {key}: {display_value}")
+            
             version_cmd = [cli_path, "version"]
             version_result = subprocess.run(
                 version_cmd, capture_output=True, text=True, timeout=30, env=env
@@ -468,8 +481,9 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
             else:
                 logger.warning(f"⚠️ CLI version check failed: {version_result.stderr}")
             
-            # Execute bundle operation using downloaded CLI
-            logger.info(f"🔧 Executing bundle {operation} with downloaded CLI...")
+            # Execute bundle operation using CLI
+            logger.info(f"🔧 Executing bundle {operation} with existing CLI...")
+            logger.info(f"🎯 CLI Path: {cli_path}")
             bundle_cmd = [cli_path, "bundle", operation]
             
             if target_env:
@@ -944,7 +958,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.1)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.2)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
