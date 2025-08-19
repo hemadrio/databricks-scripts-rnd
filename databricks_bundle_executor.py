@@ -79,7 +79,7 @@ def parse_connection_config(config_json: str) -> Dict[str, Any]:
 
 def resolve_databricks_secret_via_api(secret_expr: str) -> Optional[str]:
     """
-    Resolve Databricks secret using the existing API
+    Resolve Databricks secret using Databricks Secrets API directly
     
     Args:
         secret_expr: Secret expression (could be dbutils.secrets.get() or direct value)
@@ -109,27 +109,31 @@ def resolve_databricks_secret_via_api(secret_expr: str) -> Optional[str]:
             
             logger.info(f"🔍 Resolving secret: {scope}/{key}")
             
-            # Call the Flask API to get the secret
-            api_url = "http://localhost:3001/api/databricks/secret"
-            response = requests.post(
-                api_url,
-                json={
-                    "scope": scope,
-                    "key": key
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    value = result.get('value')
+            # Use Databricks CLI to get the secret directly
+            try:
+                import subprocess
+                import json
+                
+                # Run databricks secrets get command
+                result = subprocess.run(
+                    ['databricks', 'secrets', 'get', '--scope', scope, '--key', key],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode == 0:
+                    # The output might be just the value or JSON format
+                    value = result.stdout.strip()
                     logger.info(f"✅ Successfully resolved secret: {scope}/{key}")
                     return value
                 else:
-                    logger.error(f"❌ Failed to resolve secret: {result.get('error')}")
-            else:
-                logger.error(f"❌ API call failed: HTTP {response.status_code}")
+                    logger.error(f"❌ Databricks CLI failed: {result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                logger.error(f"❌ Timeout resolving secret: {scope}/{key}")
+            except Exception as e:
+                logger.error(f"❌ Subprocess error: {str(e)}")
                 
         return None
         
@@ -214,7 +218,7 @@ def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], t
         True if successful, False otherwise
     """
     try:
-        logger.info(f"�� Starting git clone operation")
+        logger.info(f"🌿 Starting git clone operation")
         logger.info(f"   URL: {git_url}")
         logger.info(f"   Branch: {git_branch}")
         logger.info(f"   Directory: {temp_dir}")
@@ -319,7 +323,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v3.0)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v3.1)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
