@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.0 - Pure Databricks CLI Only (No Fallbacks)
+Version: 8.1 - CLI Environment Inspection (No Download)
 """
 
 import os
@@ -240,63 +240,160 @@ def create_databricks_config(env_vars: Dict[str, str]) -> str:
         logger.error(f"❌ Failed to create Databricks config: {str(e)}")
         return None
 
-def download_and_setup_cli(tmp_dir: str) -> str:
+def inspect_cli_environment() -> dict:
     """
-    Download and setup Databricks CLI in temporary directory
+    Inspect the existing Databricks CLI environment and configuration
     
-    Args:
-        tmp_dir: Temporary directory path
-        
     Returns:
-        Path to the CLI executable
+        Dictionary with environment inspection results
     """
+    inspection_results = {
+        'platform': {},
+        'cli_paths': {},
+        'cli_versions': {},
+        'environment_vars': {},
+        'databricks_config': {},
+        'python_info': {},
+        'system_info': {}
+    }
+    
     try:
-        logger.info("📥 Downloading Databricks CLI...")
+        logger.info("🔍 INSPECTING DATABRICKS CLI ENVIRONMENT")
+        logger.info("=" * 60)
         
-        # Download CLI - detect platform
-        zip_path = os.path.join(tmp_dir, "databricks.zip")
-        
+        # 1. Platform Information
         import platform
-        system = platform.system().lower()
+        inspection_results['platform'] = {
+            'system': platform.system(),
+            'release': platform.release(),
+            'version': platform.version(),
+            'machine': platform.machine(),
+            'processor': platform.processor(),
+            'architecture': platform.architecture(),
+            'python_version': platform.python_version()
+        }
         
-        # Use specific version to avoid GitHub redirect issues
-        if system == "darwin":
-            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_darwin_amd64.zip"
-        elif system == "linux":
-            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_linux_amd64.zip"
-        else:
-            raise Exception(f"Unsupported platform: {system}")
+        logger.info("🖥️  PLATFORM INFORMATION:")
+        for key, value in inspection_results['platform'].items():
+            logger.info(f"   {key}: {value}")
         
-        download_cmd = [
-            "curl", "-L", "-o", zip_path, 
-            "--user-agent", "databricks-bundle-executor/1.0",
-            "--location-trusted",
-            "--connect-timeout", "30",
-            "--max-time", "300",
-            cli_url
+        # 2. Check for existing CLI installations
+        logger.info("\n🔧 CHECKING CLI INSTALLATIONS:")
+        possible_cli_paths = [
+            'databricks',
+            '/usr/local/bin/databricks',
+            '/usr/bin/databricks',
+            '/opt/databricks/bin/databricks',
+            'which databricks'
         ]
         
-        logger.info(f"Executing: {' '.join(download_cmd)}")
-        subprocess.check_call(download_cmd, timeout=300)
+        for cli_path in possible_cli_paths:
+            try:
+                if cli_path == 'which databricks':
+                    result = subprocess.run(['which', 'databricks'], capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        actual_path = result.stdout.strip()
+                        inspection_results['cli_paths']['which_databricks'] = actual_path
+                        logger.info(f"   ✅ which databricks: {actual_path}")
+                    else:
+                        logger.info(f"   ❌ which databricks: not found")
+                else:
+                    # Test if CLI exists and is executable
+                    test_result = subprocess.run([cli_path, '--version'], capture_output=True, text=True, timeout=10)
+                    if test_result.returncode == 0:
+                        inspection_results['cli_paths'][cli_path] = 'found'
+                        inspection_results['cli_versions'][cli_path] = test_result.stdout.strip()
+                        logger.info(f"   ✅ {cli_path}: {test_result.stdout.strip()}")
+                    else:
+                        inspection_results['cli_paths'][cli_path] = 'not_found'
+                        logger.info(f"   ❌ {cli_path}: not found or not executable")
+            except Exception as e:
+                inspection_results['cli_paths'][cli_path] = f'error: {str(e)}'
+                logger.info(f"   ❌ {cli_path}: error - {str(e)}")
         
-        # Extract CLI
-        logger.info("📦 Extracting Databricks CLI...")
-        extract_cmd = ["unzip", "-q", zip_path, "-d", tmp_dir]
-        subprocess.check_call(extract_cmd, timeout=60)
+        # 3. Environment Variables
+        logger.info("\n🌍 DATABRICKS ENVIRONMENT VARIABLES:")
+        databricks_env_vars = [
+            'DATABRICKS_HOST', 'DATABRICKS_TOKEN', 'DATABRICKS_CLIENT_ID', 
+            'DATABRICKS_CLIENT_SECRET', 'DATABRICKS_CONFIG_PROFILE',
+            'DATABRICKS_CLI_FORCE_INTERACTIVE', 'DATABRICKS_CLI_FORCE_NONINTERACTIVE',
+            'DATABRICKS_CLI_NONINTERACTIVE', 'DATABRICKS_CLI_BATCH_MODE',
+            'DATABRICKS_SERVERLESS_COMPUTE_ID', 'TERM', 'TTY', 'CI', 'DEBIAN_FRONTEND'
+        ]
         
-        # Make CLI executable
-        cli_path = os.path.join(tmp_dir, "databricks")
-        os.chmod(cli_path, 0o755)
+        for var in databricks_env_vars:
+            value = os.environ.get(var)
+            inspection_results['environment_vars'][var] = value
+            if value:
+                # Mask sensitive values
+                if 'TOKEN' in var or 'SECRET' in var:
+                    display_value = f"{value[:8]}..." if len(value) > 8 else "***"
+                else:
+                    display_value = value
+                logger.info(f"   ✅ {var}: {display_value}")
+            else:
+                logger.info(f"   ❌ {var}: not set")
         
-        logger.info(f"✅ Databricks CLI downloaded and setup at: {cli_path}")
-        return cli_path
+        # 4. All Environment Variables (for debugging)
+        logger.info("\n🔍 ALL ENVIRONMENT VARIABLES:")
+        all_env = dict(os.environ)
+        for key in sorted(all_env.keys()):
+            value = all_env[key]
+            # Only show first 50 chars for very long values
+            display_value = value if len(value) <= 50 else f"{value[:47]}..."
+            logger.info(f"   {key}: {display_value}")
         
-    except subprocess.CalledProcessError as e:
-        logger.error(f"❌ Failed to download/setup CLI: {e}")
-        return None
+        # 5. Check for .databrickscfg
+        logger.info("\n📁 DATABRICKS CONFIG FILES:")
+        config_paths = [
+            os.path.expanduser('~/.databrickscfg'),
+            './.databrickscfg',
+            '/root/.databrickscfg'
+        ]
+        
+        for config_path in config_paths:
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        config_content = f.read()
+                    inspection_results['databricks_config'][config_path] = 'exists'
+                    logger.info(f"   ✅ {config_path}: exists ({len(config_content)} chars)")
+                    # Show first few lines (non-sensitive)
+                    lines = config_content.split('\n')[:5]
+                    for line in lines:
+                        if line.strip() and not any(sensitive in line.lower() for sensitive in ['token', 'secret', 'password']):
+                            logger.info(f"      {line}")
+                except Exception as e:
+                    inspection_results['databricks_config'][config_path] = f'error: {str(e)}'
+                    logger.info(f"   ❌ {config_path}: error reading - {str(e)}")
+            else:
+                inspection_results['databricks_config'][config_path] = 'not_found'
+                logger.info(f"   ❌ {config_path}: not found")
+        
+        # 6. Python and System Info
+        logger.info("\n🐍 PYTHON ENVIRONMENT:")
+        inspection_results['python_info'] = {
+            'executable': sys.executable,
+            'version': sys.version,
+            'path': sys.path[:3]  # First 3 paths only
+        }
+        
+        logger.info(f"   Python executable: {sys.executable}")
+        logger.info(f"   Python version: {sys.version}")
+        logger.info(f"   Python path (first 3): {sys.path[:3]}")
+        
+        # 7. Working Directory
+        logger.info(f"\n📂 CURRENT WORKING DIRECTORY: {os.getcwd()}")
+        
+        logger.info("=" * 60)
+        logger.info("✅ CLI ENVIRONMENT INSPECTION COMPLETED")
+        
+        return inspection_results
+        
     except Exception as e:
-        logger.error(f"❌ CLI setup error: {str(e)}")
-        return None
+        logger.error(f"❌ Environment inspection failed: {str(e)}")
+        inspection_results['error'] = str(e)
+        return inspection_results
 
 def execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
                            env_vars: Dict[str, str]) -> bool:
@@ -333,16 +430,30 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         env = os.environ.copy()
         env.update(env_vars)
         
-        # Create temporary directory for CLI
-        cli_tmp_dir = tempfile.mkdtemp(prefix="databricks_cli_")
-        logger.info(f"📁 Created CLI temporary directory: {cli_tmp_dir}")
+        # Inspect existing CLI environment instead of downloading
+        logger.info("🔍 Inspecting existing CLI environment...")
         
         try:
-            # Download and setup Databricks CLI
-            cli_path = download_and_setup_cli(cli_tmp_dir)
-            if not cli_path:
-                logger.error("❌ FAILED: Databricks CLI is required but setup failed")
-                logger.error("❌ This script only supports CLI-based bundle operations")
+            # Perform comprehensive environment inspection
+            inspection_results = inspect_cli_environment()
+            
+            # Check if any CLI was found
+            cli_found = False
+            cli_path = None
+            
+            for path, status in inspection_results.get('cli_paths', {}).items():
+                if status == 'found' or (isinstance(status, str) and status not in ['not_found', 'error']):
+                    cli_found = True
+                    if path == 'which_databricks':
+                        cli_path = status  # The actual path from 'which'
+                    else:
+                        cli_path = path
+                    logger.info(f"✅ Found working CLI at: {cli_path}")
+                    break
+            
+            if not cli_found:
+                logger.error("❌ FAILED: No working Databricks CLI found in environment")
+                logger.error("❌ This script requires an existing CLI installation")
                 return False
             
             # Test CLI execution
@@ -388,13 +499,10 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
                 logger.error("❌ This script only supports CLI-based bundle operations")
                 return False
                 
-        finally:
-            # Cleanup CLI temporary directory
-            try:
-                shutil.rmtree(cli_tmp_dir, ignore_errors=True)
-                logger.info(f"🧹 Cleaned up CLI directory: {cli_tmp_dir}")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to cleanup CLI directory: {str(e)}")
+        except Exception as e:
+            logger.error(f"❌ CLI inspection or operation failed: {str(e)}")
+            logger.error("❌ CLI-only approach - no fallbacks available")
+            return False
         
     except subprocess.TimeoutExpired:
         logger.error("⏰ Bundle operation timed out")
@@ -836,7 +944,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.0)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.1)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
