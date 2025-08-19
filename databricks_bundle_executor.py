@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Databricks Bundle Executor Script - Final Version with Secret Resolution
+Databricks Bundle Executor Script - Serverless Job Compute Version
 
-This script is designed to be executed via Spark Task Manager to perform
-databricks bundle operations (git clone + bundle validate/deploy).
+This script is designed to be executed on Databricks serverless job compute to perform
+databricks bundle operations (git clone + bundle validate/deploy) using Databricks CLI only.
 
-It supports both Personal Access Token and Service Principal authentication
-and integrates with the existing secret resolution API.
+Optimized for serverless compute with CLI-only execution (no SDK or REST API).
 
-Usage via Spark Task Manager:
+Usage on Databricks Serverless Job Compute:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 3.0 - Added Secret Resolution API Integration
+Version: 4.0 - Serverless Job Compute with CLI-only execution
 """
 
 import os
@@ -24,14 +23,19 @@ import shutil
 import argparse
 import logging
 import requests
+import time
 from typing import Dict, Any, Optional
 
-# Set up logging
+# Set up logging optimized for serverless execution
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - [SERVERLESS] %(message)s',
+    force=True  # Override any existing logging configuration
 )
 logger = logging.getLogger(__name__)
+
+# Configure for serverless environment
+logger.propagate = False  # Prevent duplicate logs in serverless environment
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -60,6 +64,14 @@ def parse_arguments():
     parser.add_argument('--timeout', type=int, default=600, help='Operation timeout in seconds')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     
+    # Serverless-specific parameters
+    parser.add_argument('--serverless-optimized', action='store_true', default=True,
+                       help='Enable serverless job compute optimizations (default: True)')
+    parser.add_argument('--cli-retries', type=int, default=3, 
+                       help='Number of retry attempts for CLI commands (default: 3)')
+    parser.add_argument('--cli-retry-delay', type=int, default=5, 
+                       help='Delay between CLI retry attempts in seconds (default: 5)')
+    
     return parser.parse_args()
 
 def get_env_or_arg(value: str, env_var: str) -> Optional[str]:
@@ -77,9 +89,10 @@ def parse_connection_config(config_json: str) -> Dict[str, Any]:
         logger.warning(f"Failed to parse connection config: {e}")
     return {}
 
-def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: Optional[str], databricks_token: Optional[str]) -> Dict[str, str]:
+def setup_databricks_authentication_serverless(db_config: Dict[str, Any], databricks_host: Optional[str], databricks_token: Optional[str]) -> Dict[str, str]:
     """
-    Setup Databricks authentication based on connection configuration
+    Setup Databricks authentication for serverless job compute
+    Optimized for CLI-only execution with enhanced serverless compute support
     
     Args:
         db_config: Databricks connection configuration
@@ -91,24 +104,31 @@ def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: 
     """
     env_vars = {}
     
-    # Get host
+    logger.info("🚀 Setting up authentication for Databricks serverless job compute")
+    
+    # Get host - prioritize explicit host argument
     host = databricks_host or db_config.get('workspace_url') or db_config.get('databricks_instance_url')
     if host:
-        env_vars['DATABRICKS_HOST'] = host.replace('https://', '').replace('http://', '')
-        logger.info(f"🔧 Using Databricks host: {host}")
+        # Ensure host is in correct format for CLI
+        clean_host = host.replace('https://', '').replace('http://', '')
+        env_vars['DATABRICKS_HOST'] = clean_host
+        logger.info(f"🔧 Using Databricks host: {clean_host}")
+    else:
+        logger.error("❌ Databricks host is required for serverless job compute")
+        return {}
     
-    # Determine authentication type
+    # Determine authentication type - prefer service principal for serverless
     auth_type = db_config.get('authentication_type', 'personal_access_token')
     
     if auth_type == 'service_principal':
-        # Service Principal authentication
+        # Service Principal authentication (recommended for serverless)
         client_id = db_config.get('client_id')
         secret = db_config.get('secret')
         
         if client_id and secret:
             env_vars['DATABRICKS_CLIENT_ID'] = client_id
             env_vars['DATABRICKS_CLIENT_SECRET'] = secret
-            logger.info("🔧 Using Service Principal authentication")
+            logger.info("🔧 Using Service Principal authentication (recommended for serverless)")
             logger.info(f"   Client ID: {client_id[:10]}...")
         else:
             logger.error("❌ Service Principal authentication requires client_id and secret")
@@ -123,6 +143,22 @@ def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: 
         else:
             logger.error("❌ Personal Access Token authentication requires token")
             return {}
+    
+    # Set additional serverless-specific environment variables
+    env_vars['DATABRICKS_CLI_PROFILE'] = 'DEFAULT'
+    env_vars['DATABRICKS_OUTPUT_FORMAT'] = 'json'
+    
+    # Disable interactive prompts for serverless execution
+    env_vars['DATABRICKS_CLI_CONFIGURE_INTERACTIVE'] = 'false'
+    
+    logger.info("✅ Databricks authentication configured for serverless execution")
+    # Log final environment setup for serverless
+    logger.info(f"🔍 Final serverless environment configuration:")
+    for key in env_vars:
+        if 'TOKEN' in key or 'SECRET' in key:
+            logger.info(f"   {key}: [REDACTED]")
+        else:
+            logger.info(f"   {key}: {env_vars[key]}")
     
     return env_vars
 
@@ -183,184 +219,222 @@ def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], t
         logger.error(f"❌ Git clone operation failed: {str(e)}")
         return False
 
-def execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
-                           env_vars: Dict[str, str]) -> bool:
+def execute_bundle_operation_cli_only(operation: str, target_env: str, work_dir: str, 
+                                     env_vars: Dict[str, str], timeout: int = 600, 
+                                     retries: int = 3, retry_delay: int = 5) -> bool:
     """
-    Execute databricks bundle operation using Python SDK
+    Execute databricks bundle operation using Databricks CLI only (optimized for serverless)
     
     Args:
-        operation: Bundle operation (validate, deploy, etc.)
+        operation: Bundle operation (validate, deploy, destroy, run)
         target_env: Target environment
         work_dir: Working directory
         env_vars: Environment variables for Databricks authentication
+        timeout: Command timeout in seconds
+        retries: Number of retry attempts
+        retry_delay: Delay between retries in seconds
         
     Returns:
         True if successful, False otherwise
     """
     try:
-        logger.info(f"🚀 Starting databricks bundle {operation} operation")
+        logger.info(f"🚀 Starting databricks bundle {operation} operation (CLI-only, serverless optimized)")
         logger.info(f"   Target Environment: {target_env}")
         logger.info(f"   Working Directory: {work_dir}")
         logger.info(f"   Authentication: {list(env_vars.keys())}")
+        logger.info(f"   Timeout: {timeout}s")
         
-        # Debug: List files in working directory
-        try:
-            files = os.listdir(work_dir)
-            logger.info(f"📁 Files in working directory: {files}")
-            if 'databricks.yml' in files:
-                logger.info("✅ databricks.yml found in working directory")
-            else:
-                logger.warning("⚠️ databricks.yml not found in working directory")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not list files in working directory: {str(e)}")
+        # Validate working directory and bundle files
+        if not validate_bundle_directory(work_dir):
+            return False
         
-        # Debug: Check environment
-        logger.info(f"🔍 Environment check:")
-        logger.info(f"   TERM: {os.environ.get('TERM', 'NOT_SET')}")
-        logger.info(f"   TTY: {os.environ.get('TTY', 'NOT_SET')}")
-        logger.info(f"   PYTHONPATH: {os.environ.get('PYTHONPATH', 'NOT_SET')}")
-        logger.info(f"   DATABRICKS_HOST: {env_vars.get('DATABRICKS_HOST', 'NOT_SET')}")
-        
-        # Set up environment variables
+        # Set up environment variables for serverless execution
         env = os.environ.copy()
         env.update(env_vars)
         
-        # Try CLI first with non-interactive flags
-        logger.info("🔧 Attempting Databricks CLI with non-interactive mode...")
+        # Additional serverless-specific environment setup
+        env['PYTHONUNBUFFERED'] = '1'  # Ensure real-time logging
+        env['DATABRICKS_CLI_DO_NOT_TRACK'] = '1'  # Disable tracking
         
-        # Build bundle command with non-interactive flags
-        bundle_cmd = f"databricks bundle {operation} -t {target_env} --output json"
-        logger.info(f"Executing: {bundle_cmd}")
+        # Build optimized bundle command for serverless
+        base_cmd = f"databricks bundle {operation} --target {target_env}"
         
-        # Execute bundle command
-        bundle_result = subprocess.run(
-            bundle_cmd, shell=True, capture_output=True, text=True, timeout=600, 
-            cwd=work_dir, env=env
-        )
+        # Add serverless-specific flags
+        cmd_flags = [
+            "--output json",  # Structured output
+            "--progress-format json",  # JSON progress for parsing
+            "--no-prompt"  # Disable interactive prompts
+        ]
         
-        if bundle_result.returncode == 0:
-            logger.info("✅ Bundle operation completed successfully")
-            if bundle_result.stdout:
-                logger.info(f"📄 Output: {bundle_result.stdout}")
-            return True
-        else:
-            logger.error(f"❌ CLI failed with return code: {bundle_result.returncode}")
-            if bundle_result.stderr:
-                logger.error(f"Error output: {bundle_result.stderr}")
-            if bundle_result.stdout:
-                logger.error(f"Standard output: {bundle_result.stdout}")
-            
-            # If CLI fails, try Python SDK as fallback
-            logger.info("🔄 CLI failed, trying Python SDK as fallback...")
-            return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
+        bundle_cmd = f"{base_cmd} {' '.join(cmd_flags)}"
+        logger.info(f"🗥️ Executing: {bundle_cmd}")
         
-    except subprocess.TimeoutExpired:
-        logger.error("⏰ Bundle operation timed out")
+        # Execute bundle command with retry logic for serverless resilience
+        last_error = None
+        
+        for attempt in range(retries):
+            try:
+                if attempt > 0:
+                    logger.info(f"🔄 Retry attempt {attempt + 1}/{retries} for {operation}")
+                    time.sleep(retry_delay)
+                
+                bundle_result = subprocess.run(
+                    bundle_cmd, 
+                    shell=True, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=timeout, 
+                    cwd=work_dir, 
+                    env=env,
+                    check=False  # Don't raise exception on non-zero exit
+                )
+                
+                # Process command results
+                if process_bundle_result(bundle_result, operation, target_env):
+                    return True
+                else:
+                    # Log failure and prepare for retry if applicable
+                    last_error = f"CLI command failed with exit code {bundle_result.returncode}"
+                    if attempt < retries - 1:
+                        logger.warning(f"⚠️ Attempt {attempt + 1} failed, retrying in {retry_delay}s...")
+                    else:
+                        logger.error(f"❌ All {retries} attempts failed for {operation}")
+                    
+            except subprocess.TimeoutExpired:
+                last_error = f"Operation timed out after {timeout}s"
+                logger.error(f"⏰ Bundle {operation} operation timed out after {timeout}s")
+                if attempt < retries - 1:
+                    logger.warning(f"⚠️ Timeout on attempt {attempt + 1}, retrying...")
+                else:
+                    logger.error("⚠️ Consider increasing timeout for large bundles")
+                    
+        logger.error(f"❌ Final failure after {retries} attempts: {last_error}")
         return False
+            
     except Exception as e:
-        logger.error(f"❌ Bundle operation failed: {str(e)}")
+        logger.error(f"❌ Bundle operation failed with exception: {str(e)}")
+        logger.error("🔍 Check Databricks CLI installation and authentication")
         return False
 
-def execute_bundle_operation_sdk(operation: str, target_env: str, work_dir: str, 
-                               env_vars: Dict[str, str]) -> bool:
+def validate_bundle_directory(work_dir: str) -> bool:
     """
-    Execute databricks bundle operation using simplified validation
+    Validate that the working directory contains required bundle files
     
     Args:
-        operation: Bundle operation (validate, deploy, etc.)
+        work_dir: Working directory to validate
+        
+    Returns:
+        True if validation passes, False otherwise
+    """
+    try:
+        # Check if directory exists
+        if not os.path.exists(work_dir):
+            logger.error(f"❌ Working directory does not exist: {work_dir}")
+            return False
+        
+        # List files in working directory
+        try:
+            files = os.listdir(work_dir)
+            logger.info(f"📁 Files in working directory: {files}")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not list files in working directory: {str(e)}")
+            return False
+        
+        # Check for required databricks.yml file
+        yaml_path = os.path.join(work_dir, 'databricks.yml')
+        if not os.path.exists(yaml_path):
+            logger.error("❌ databricks.yml not found in working directory")
+            logger.error(f"   Expected location: {yaml_path}")
+            return False
+        
+        logger.info("✅ databricks.yml found in working directory")
+        
+        # Basic validation of databricks.yml content
+        try:
+            with open(yaml_path, 'r') as f:
+                yaml_content = f.read()
+            
+            if not yaml_content.strip():
+                logger.error("❌ databricks.yml is empty")
+                return False
+            
+            # Check for required sections
+            required_sections = ['bundle:', 'targets:']
+            for section in required_sections:
+                if section not in yaml_content:
+                    logger.error(f"❌ Missing required section: {section}")
+                    return False
+            
+            logger.info("✅ databricks.yml contains required sections")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to read databricks.yml: {str(e)}")
+            return False
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Bundle directory validation failed: {str(e)}")
+        return False
+
+
+def process_bundle_result(result: subprocess.CompletedProcess, operation: str, target_env: str) -> bool:
+    """
+    Process the result of a bundle CLI command execution
+    
+    Args:
+        result: Completed subprocess result
+        operation: Bundle operation that was executed
         target_env: Target environment
-        work_dir: Working directory
-        env_vars: Environment variables for Databricks authentication
         
     Returns:
         True if successful, False otherwise
     """
-    try:
-        logger.info("🔧 Using simplified bundle validation")
+    if result.returncode == 0:
+        logger.info(f"✅ Bundle {operation} completed successfully for {target_env}")
         
-        # Read and validate the bundle configuration
-        logger.info(f"📄 Reading bundle configuration from {work_dir}")
+        # Parse and log structured output if available
+        if result.stdout:
+            try:
+                # Try to parse JSON output
+                import json
+                output_data = json.loads(result.stdout)
+                logger.info("📄 Structured output:")
+                logger.info(json.dumps(output_data, indent=2))
+            except json.JSONDecodeError:
+                # If not JSON, log as plain text
+                logger.info(f"📄 Output: {result.stdout}")
         
-        # Read and display the databricks.yml content for validation
-        yaml_path = os.path.join(work_dir, 'databricks.yml')
-        if os.path.exists(yaml_path):
-            with open(yaml_path, 'r') as f:
-                yaml_content = f.read()
-            logger.info(f"📄 Bundle configuration content:")
-            logger.info(f"---\n{yaml_content}\n---")
-            
-            # Basic string-based validation (no YAML parsing)
-            logger.info("🔍 Performing basic validation...")
-            
-            # Check for required sections
-            if 'bundle:' not in yaml_content:
-                logger.error("❌ Missing 'bundle:' section")
-                return False
-            else:
-                logger.info("✅ Bundle section found")
-            
-            if 'targets:' not in yaml_content:
-                logger.error("❌ Missing 'targets:' section")
-                return False
-            else:
-                logger.info("✅ Targets section found")
-            
-            if f'{target_env}:' not in yaml_content:
-                logger.error(f"❌ Target environment '{target_env}' not found in configuration")
-                return False
-            else:
-                logger.info(f"✅ Target environment '{target_env}' found")
-            
-            # Check for workspace configuration
-            if 'workspace:' in yaml_content:
-                logger.info("✅ Workspace configuration found")
-                
-                # Extract host from content using string parsing
-                lines = yaml_content.split('\n')
-                yaml_host = None
-                for line in lines:
-                    if 'host:' in line and 'workspace:' in yaml_content:
-                        # Simple string extraction
-                        if 'host:' in line:
-                            yaml_host = line.split('host:')[1].strip()
-                            logger.info(f"🔍 Found workspace host in YAML: {yaml_host}")
-                            break
-                
-                # Compare with connection host
-                connection_host = env_vars.get('DATABRICKS_HOST')
-                if connection_host and yaml_host:
-                    if yaml_host == connection_host:
-                        logger.info("✅ Workspace host matches connection configuration")
-                    else:
-                        logger.warning(f"⚠️ Workspace host mismatch:")
-                        logger.warning(f"   YAML host: {yaml_host}")
-                        logger.warning(f"   Connection host: {connection_host}")
-                        logger.warning(f"   This may cause validation to fail")
-            else:
-                logger.warning("⚠️ No workspace configuration found in target")
-            
-            # Check for variables section
-            if 'variables:' in yaml_content:
-                logger.info("✅ Variables section found")
-            else:
-                logger.warning("⚠️ No variables section found")
-            
-            # Check for include section
-            if 'include:' in yaml_content:
-                logger.info("✅ Include section found")
-            else:
-                logger.warning("⚠️ No include section found")
-            
-            logger.info("✅ Bundle configuration validation completed")
-            logger.info("📝 Note: This is a basic validation. Full bundle validation requires Databricks CLI/SDK")
-            logger.info("✅ Bundle operation would succeed (simulated)")
-            return True
-        else:
-            logger.error(f"❌ databricks.yml not found at {yaml_path}")
-            return False
+        if result.stderr and result.stderr.strip():
+            logger.info(f"📝 Warnings/Info: {result.stderr}")
         
-    except Exception as e:
-        logger.error(f"❌ SDK fallback failed: {str(e)}")
+        return True
+    else:
+        logger.error(f"❌ Bundle {operation} failed for {target_env} (exit code: {result.returncode})")
+        
+        # Enhanced error reporting
+        if result.stderr:
+            logger.error(f"🚫 Error details: {result.stderr}")
+            
+            # Provide specific guidance for common errors
+            stderr_lower = result.stderr.lower()
+            if 'authentication' in stderr_lower or 'unauthorized' in stderr_lower:
+                logger.error("🔐 Authentication error detected:")
+                logger.error("   - Check DATABRICKS_HOST environment variable")
+                logger.error("   - Verify DATABRICKS_TOKEN or service principal credentials")
+                logger.error("   - Ensure credentials have proper permissions")
+            elif 'not found' in stderr_lower:
+                logger.error("📁 Resource not found error detected:")
+                logger.error("   - Verify target environment configuration")
+                logger.error("   - Check workspace and cluster settings")
+            elif 'timeout' in stderr_lower:
+                logger.error("⏰ Timeout error detected:")
+                logger.error("   - Consider increasing the timeout value")
+                logger.error("   - Check network connectivity to Databricks")
+        
+        if result.stdout:
+            logger.error(f"📄 Standard output: {result.stdout}")
+        
         return False
 
 def main():
@@ -373,9 +447,16 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v5.4)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script - Serverless CLI-Only (v4.0)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
+        
+        # Log serverless-specific configuration
+        if hasattr(args, 'serverless_optimized') and args.serverless_optimized:
+            logger.info("☁️ Serverless optimizations: ENABLED")
+            logger.info(f"   CLI Retries: {args.cli_retries}")
+            logger.info(f"   Retry Delay: {args.cli_retry_delay}s")
+            logger.info(f"   Timeout: {args.timeout}s")
         
         # Get values from arguments or environment variables
         git_url = args.git_url
@@ -401,8 +482,8 @@ def main():
             db_config = parse_connection_config(args.databricks_connection_config)
             logger.info("🔧 Using Databricks config from connection config")
         
-        # Setup Databricks authentication
-        env_vars = setup_databricks_authentication(db_config, databricks_host, databricks_token)
+        # Setup Databricks authentication for serverless
+        env_vars = setup_databricks_authentication_serverless(db_config, databricks_host, databricks_token)
         if not env_vars:
             logger.error("❌ Failed to setup Databricks authentication")
             sys.exit(1)
@@ -439,8 +520,13 @@ def main():
                 work_dir = temp_dir
                 logger.info(f"📂 Using root directory: {work_dir}")
             
-            # Step 3: Execute bundle operation
-            if not execute_bundle_operation(operation, target_env, work_dir, env_vars):
+            # Step 3: Execute bundle operation (CLI-only) with serverless optimizations
+            if not execute_bundle_operation_cli_only(
+                operation, target_env, work_dir, env_vars, 
+                timeout=args.timeout,
+                retries=args.cli_retries,
+                retry_delay=args.cli_retry_delay
+            ):
                 logger.error("❌ Bundle operation failed")
                 sys.exit(1)
             
