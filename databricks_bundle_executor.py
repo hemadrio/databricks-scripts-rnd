@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 6.8 - Dynamic CLI Download for Serverless Support
+Version: 6.9 - Real Databricks API Validation
 """
 
 import os
@@ -460,68 +460,123 @@ def execute_bundle_validation(yaml_content: str, target_env: str, env_vars: Dict
         True if successful, False otherwise
     """
     try:
-        logger.info("🔍 Performing bundle validation...")
+        logger.info("🔍 Performing REAL bundle validation via Databricks API...")
         
-        # Basic string-based validation
-        if 'bundle:' not in yaml_content:
-            logger.error("❌ Missing 'bundle:' section")
-            return False
-        else:
-            logger.info("✅ Bundle section found")
+        # Get authentication details
+        workspace_url = f"https://{env_vars.get('DATABRICKS_HOST')}"
+        client_id = env_vars.get('DATABRICKS_CLIENT_ID')
+        client_secret = env_vars.get('DATABRICKS_CLIENT_SECRET')
+        token = env_vars.get('DATABRICKS_TOKEN')
         
-        if 'targets:' not in yaml_content:
-            logger.error("❌ Missing 'targets:' section")
-            return False
-        else:
-            logger.info("✅ Targets section found")
+        logger.info(f"🔗 Target workspace: {workspace_url}")
         
-        if f'{target_env}:' not in yaml_content:
-            logger.error(f"❌ Target environment '{target_env}' not found in configuration")
-            return False
-        else:
-            logger.info(f"✅ Target environment '{target_env}' found")
-        
-        # Check for workspace configuration
-        if 'workspace:' in yaml_content:
-            logger.info("✅ Workspace configuration found")
+        # Get access token
+        headers = {}
+        if token:
+            headers['Authorization'] = f'Bearer {token}'
+            logger.info("🔐 Using Personal Access Token for API authentication")
+        elif client_id and client_secret:
+            logger.info("🔐 Getting OAuth token using Service Principal...")
+            import requests
             
-            # Extract host from content using string parsing
-            lines = yaml_content.split('\n')
-            yaml_host = None
-            for line in lines:
-                if 'host:' in line and 'workspace:' in yaml_content:
-                    if 'host:' in line:
-                        yaml_host = line.split('host:')[1].strip()
-                        logger.info(f"🔍 Found workspace host in YAML: {yaml_host}")
-                        break
+            token_url = f"{workspace_url}/oidc/v1/token"
+            token_response = requests.post(token_url, data={
+                'grant_type': 'client_credentials',
+                'client_id': client_id,
+                'client_secret': client_secret
+            }, timeout=30)
             
-            # Compare with connection host
-            connection_host = env_vars.get('DATABRICKS_HOST')
-            if connection_host and yaml_host:
-                if yaml_host == connection_host:
-                    logger.info("✅ Workspace host matches connection configuration")
+            if token_response.status_code != 200:
+                logger.error(f"❌ Failed to get OAuth token: {token_response.text}")
+                return False
+                
+            access_token = token_response.json()['access_token']
+            headers['Authorization'] = f'Bearer {access_token}'
+            logger.info("✅ OAuth token obtained successfully")
+        else:
+            logger.error("❌ No valid authentication method found")
+            return False
+        
+        # Test workspace connectivity
+        logger.info("🔧 Testing workspace connectivity...")
+        headers['Content-Type'] = 'application/json'
+        
+        import requests
+        workspace_test_url = f"{workspace_url}/api/2.0/workspace/list"
+        test_response = requests.get(workspace_test_url, headers=headers, params={'path': '/'}, timeout=30)
+        
+        logger.info(f"📊 Workspace test response: {test_response.status_code}")
+        
+        if test_response.status_code != 200:
+            logger.error(f"❌ Workspace connectivity failed: {test_response.text}")
+            return False
+        
+        logger.info("✅ Workspace connectivity verified!")
+        
+        # Parse YAML and validate by creating a test job
+        try:
+            import yaml
+            bundle_config = yaml.safe_load(yaml_content)
+            logger.info("✅ Bundle YAML parsed successfully")
+            
+            # Extract job configuration from bundle
+            resources = bundle_config.get('resources', {})
+            jobs = resources.get('jobs', {})
+            
+            if jobs:
+                # Take the first job for validation
+                job_name, job_config = next(iter(jobs.items()))
+                logger.info(f"🔧 Validating job configuration via Databricks Jobs API: {job_name}")
+                
+                # Create a test job payload
+                test_job_payload = {
+                    'name': f"VALIDATION-TEST-{job_name}-{target_env}",
+                    'tasks': job_config.get('tasks', []),
+                    'timeout_seconds': 3600,
+                    'max_concurrent_runs': 1
+                }
+                
+                # Call Jobs API to validate the configuration
+                jobs_url = f"{workspace_url}/api/2.1/jobs/create"
+                logger.info("🚀 Creating test job to validate bundle configuration...")
+                
+                validation_response = requests.post(jobs_url, headers=headers, json=test_job_payload, timeout=60)
+                logger.info(f"📊 Job validation response: {validation_response.status_code}")
+                
+                if validation_response.status_code == 200:
+                    job_data = validation_response.json()
+                    job_id = job_data.get('job_id')
+                    logger.info(f"✅ Bundle validation successful! Test job created: {job_id}")
+                    
+                    # Clean up test job immediately
+                    if job_id:
+                        logger.info("🧹 Cleaning up test job...")
+                        delete_url = f"{workspace_url}/api/2.1/jobs/delete"
+                        delete_payload = {'job_id': job_id}
+                        delete_response = requests.post(delete_url, headers=headers, json=delete_payload, timeout=30)
+                        if delete_response.status_code == 200:
+                            logger.info("✅ Test job cleaned up successfully")
+                        else:
+                            logger.warning(f"⚠️ Failed to clean up test job: {delete_response.text}")
+                    
+                    logger.info("✅ REAL Bundle validation completed successfully via Databricks API!")
+                    return True
                 else:
-                    logger.warning(f"⚠️ Workspace host mismatch:")
-                    logger.warning(f"   YAML host: {yaml_host}")
-                    logger.warning(f"   Connection host: {connection_host}")
-                    logger.warning(f"   This may cause validation to fail")
-        else:
-            logger.warning("⚠️ No workspace configuration found in target")
-        
-        # Check for other sections
-        if 'variables:' in yaml_content:
-            logger.info("✅ Variables section found")
-        else:
-            logger.warning("⚠️ No variables section found")
-        
-        if 'include:' in yaml_content:
-            logger.info("✅ Include section found")
-        else:
-            logger.warning("⚠️ No include section found")
-        
-        logger.info("✅ Bundle configuration validation completed")
-        logger.info("✅ Bundle is ready for deployment")
-        return True
+                    logger.error(f"❌ Bundle validation failed via Jobs API: {validation_response.text}")
+                    return False
+            else:
+                logger.warning("⚠️ No jobs found in bundle, checking basic structure...")
+                # Basic structure validation
+                if 'bundle' in bundle_config and 'targets' in bundle_config:
+                    logger.info("✅ Bundle has basic structure (bundle + targets)")
+                    return True
+                else:
+                    logger.error("❌ Bundle missing required structure")
+                    return False
+                
+        except Exception as yaml_error:
+            logger.error(f"❌ YAML parsing/validation error: {str(yaml_error)}")
+            return False
         
     except Exception as e:
         logger.error(f"❌ Validation failed: {str(e)}")
@@ -657,7 +712,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v6.6)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v6.9)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
