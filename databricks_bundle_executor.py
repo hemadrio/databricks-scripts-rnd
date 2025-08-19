@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 6.9 - Real Databricks API Validation
+Version: 7.0 - Enhanced CLI Download + Auth Debug
 """
 
 import os
@@ -267,7 +267,9 @@ def download_and_setup_cli(tmp_dir: str) -> str:
             raise Exception(f"Unsupported platform: {system}")
         
         download_cmd = [
-            "curl", "-L", "-o", zip_path, cli_url
+            "curl", "-L", "-o", zip_path, 
+            "--user-agent", "databricks-bundle-executor/1.0",
+            "--location-trusted", cli_url
         ]
         
         logger.info(f"Executing: {' '.join(download_cmd)}")
@@ -477,6 +479,10 @@ def execute_bundle_validation(yaml_content: str, target_env: str, env_vars: Dict
             logger.info("🔐 Using Personal Access Token for API authentication")
         elif client_id and client_secret:
             logger.info("🔐 Getting OAuth token using Service Principal...")
+            logger.info(f"🔗 Token URL: {workspace_url}/oidc/v1/token")
+            logger.info(f"🔑 Client ID length: {len(client_id) if client_id else 0}")
+            logger.info(f"🔑 Client Secret length: {len(client_secret) if client_secret else 0}")
+            
             import requests
             
             token_url = f"{workspace_url}/oidc/v1/token"
@@ -712,7 +718,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v6.9)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v7.0)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
