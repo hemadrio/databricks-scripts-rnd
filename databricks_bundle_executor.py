@@ -291,8 +291,8 @@ def execute_bundle_operation_sdk(operation: str, target_env: str, work_dir: str,
             
             # Basic validation of the YAML content
             try:
-                import yaml
-                yaml_data = yaml.safe_load(yaml_content)
+                import yaml as pyyaml
+                yaml_data = pyyaml.safe_load(yaml_content)
                 logger.info("✅ YAML syntax is valid")
                 
                 # Check for required fields
@@ -332,7 +332,7 @@ def execute_bundle_operation_sdk(operation: str, target_env: str, work_dir: str,
                 logger.info("📝 Note: This is a basic validation. Full bundle validation requires Databricks CLI/SDK")
                 return True
                 
-            except yaml.YAMLError as e:
+            except pyyaml.YAMLError as e:
                 logger.error(f"❌ Invalid YAML syntax: {str(e)}")
                 return False
             except ImportError:
@@ -357,7 +357,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v5.2)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v5.3)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
