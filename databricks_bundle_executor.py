@@ -203,6 +203,17 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         logger.info(f"   Working Directory: {work_dir}")
         logger.info(f"   Authentication: {list(env_vars.keys())}")
         
+        # Debug: List files in working directory
+        try:
+            files = os.listdir(work_dir)
+            logger.info(f"📁 Files in working directory: {files}")
+            if 'databricks.yml' in files:
+                logger.info("✅ databricks.yml found in working directory")
+            else:
+                logger.warning("⚠️ databricks.yml not found in working directory")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not list files in working directory: {str(e)}")
+        
         # Build bundle command
         bundle_cmd = f"databricks bundle {operation} -t {target_env}"
         logger.info(f"Executing: {bundle_cmd}")
@@ -218,8 +229,11 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         )
         
         if bundle_result.returncode != 0:
-            logger.error(f"Bundle operation failed: {bundle_result.stderr}")
-            logger.error(f"Return code: {bundle_result.returncode}")
+            logger.error(f"Bundle operation failed with return code: {bundle_result.returncode}")
+            if bundle_result.stderr:
+                logger.error(f"Error output: {bundle_result.stderr}")
+            if bundle_result.stdout:
+                logger.error(f"Standard output: {bundle_result.stdout}")
             return False
         
         logger.info("✅ Bundle operation completed successfully")
