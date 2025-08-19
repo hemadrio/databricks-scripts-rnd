@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 7.1 - Hardcoded YAML Test Fallback
+Version: 7.2 - Fixed YAML Import Bug
 """
 
 import os
@@ -500,8 +500,8 @@ resources:
         
         # Parse the hardcoded YAML to validate structure
         try:
-            import yaml
-            parsed_yaml = yaml.safe_load(hardcoded_yaml)
+            import yaml as pyyaml
+            parsed_yaml = pyyaml.safe_load(hardcoded_yaml)
             logger.info("✅ Hardcoded YAML parsed successfully")
             
             # Validate required sections
@@ -545,7 +545,7 @@ resources:
             logger.info("🎯 Bundle structure is valid and ready for deployment")
             return True
             
-        except yaml.YAMLError as e:
+        except Exception as e:
             logger.error(f"❌ YAML parsing error: {str(e)}")
             return False
             
@@ -824,7 +824,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v7.1)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v7.2)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
