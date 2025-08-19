@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+"""
+Databricks Bundle Executor Script
+
+This script is designed to be executed via Spark Task Manager to perform
+databricks bundle operations (git clone + bundle validate/deploy).
+
+It expects parameters to be passed via command line arguments or environment variables.
+
+Usage via Spark Task Manager:
+    python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
+
+Author: DataOps Team
+Version: 1.0
+"""
+
+import os
+import sys
+import json
+import subprocess
+import tempfile
+import shutil
+import argparse
+import logging
+from typing import Dict, Any, Optional
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='Databricks Bundle Executor Script')
+    
+    # Git parameters
+    parser.add_argument('--git_url', required=True, help='Git repository URL')
+    parser.add_argument('--git_branch', default='main', help='Git branch to clone')
+    parser.add_argument('--git_token', help='Git personal access token for authentication')
+    
+    # Databricks parameters
+    parser.add_argument('--yaml_path', required=True, help='Path to databricks.yml file')
+    parser.add_argument('--target_env', default='dev', help='Target environment (dev, prod, staging)')
+    parser.add_argument('--databricks_host', help='Databricks workspace host')
+    parser.add_argument('--databricks_token', help='Databricks access token')
+    
+    # Connection configurations (JSON strings)
+    parser.add_argument('--git_connection_config', help='Git connection configuration as JSON string')
+    parser.add_argument('--databricks_connection_config', help='Databricks connection configuration as JSON string')
+    
+    # Operation parameters
+    parser.add_argument('--operation', default='validate', choices=['validate', 'deploy', 'destroy', 'run'], 
+                       help='Bundle operation to perform')
+    
+    # Optional parameters
+    parser.add_argument('--timeout', type=int, default=600, help='Operation timeout in seconds')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
+    
+    return parser.parse_args()
+
+def get_env_or_arg(value: str, env_var: str) -> Optional[str]:
+    """Get value from argument or environment variable"""
+    if value:
+        return value
+    return os.environ.get(env_var)
+
+def parse_connection_config(config_json: str) -> Dict[str, Any]:
+    """Parse connection configuration JSON string"""
+    try:
+        if config_json:
+            return json.loads(config_json)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse connection config: {e}")
+    return {}
+
+def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], temp_dir: str) -> bool:
+    """
+    Execute git clone operation
+    
+    Args:
+        git_url: Git repository URL
+        git_branch: Git branch to clone
+        git_token: Git personal access token
+        temp_dir: Temporary directory for cloning
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        logger.info(f"🌿 Starting git clone operation")
+        logger.info(f"   URL: {git_url}")
+        logger.info(f"   Branch: {git_branch}")
+        logger.info(f"   Directory: {temp_dir}")
+        
+        # Handle authentication if token provided
+        authenticated_url = git_url
+        if git_token:
+            if 'github.com' in git_url:
+                # For GitHub, use token in URL
+                authenticated_url = git_url.replace('https://', f'https://{git_token}@')
+                logger.info("🔐 Using authenticated GitHub URL")
+            elif 'gitlab.com' in git_url:
+                # For GitLab, use token in URL
+                authenticated_url = git_url.replace('https://', f'https://oauth2:{git_token}@')
+                logger.info("🔐 Using authenticated GitLab URL")
+            else:
+                # For other providers, try token in URL
+                authenticated_url = git_url.replace('https://', f'https://{git_token}@')
+                logger.info("🔐 Using authenticated URL")
+        
+        # Execute git clone
+        clone_cmd = f"git clone {authenticated_url} --depth 1 --branch {git_branch} {temp_dir}"
+        logger.info(f"Executing: {clone_cmd}")
+        
+        clone_result = subprocess.run(
+            clone_cmd, shell=True, capture_output=True, text=True, timeout=300
+        )
+        
+        if clone_result.returncode != 0:
+            logger.error(f"Git clone failed: {clone_result.stderr}")
+            return False
+        
+        logger.info("✅ Git clone completed successfully")
+        return True
+        
+    except subprocess.TimeoutExpired:
+        logger.error("⏰ Git clone operation timed out")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Git clone operation failed: {str(e)}")
+        return False
+
+def execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
+                           databricks_host: Optional[str], databricks_token: Optional[str]) -> bool:
+    """
+    Execute databricks bundle operation
+    
+    Args:
+        operation: Bundle operation (validate, deploy, etc.)
+        target_env: Target environment
+        work_dir: Working directory
+        databricks_host: Databricks workspace host
+        databricks_token: Databricks access token
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        logger.info(f"🚀 Starting databricks bundle {operation} operation")
+        logger.info(f"   Target Environment: {target_env}")
+        logger.info(f"   Working Directory: {work_dir}")
+        
+        # Build bundle command
+        bundle_cmd = f"databricks bundle {operation} -t {target_env}"
+        logger.info(f"Executing: {bundle_cmd}")
+        
+        # Set up environment variables
+        env = os.environ.copy()
+        if databricks_host:
+            env['DATABRICKS_HOST'] = databricks_host.replace('https://', '').replace('http://', '')
+            logger.info(f"🔧 Using Databricks host: {databricks_host}")
+        
+        if databricks_token:
+            env['DATABRICKS_TOKEN'] = databricks_token
+            logger.info("🔧 Using Databricks token")
+        
+        # Execute bundle command
+        bundle_result = subprocess.run(
+            bundle_cmd, shell=True, capture_output=True, text=True, timeout=600, 
+            cwd=work_dir, env=env
+        )
+        
+        if bundle_result.returncode != 0:
+            logger.error(f"Bundle operation failed: {bundle_result.stderr}")
+            logger.error(f"Return code: {bundle_result.returncode}")
+            return False
+        
+        logger.info("✅ Bundle operation completed successfully")
+        if bundle_result.stdout:
+            logger.info(f"📄 Output: {bundle_result.stdout}")
+        
+        return True
+        
+    except subprocess.TimeoutExpired:
+        logger.error("⏰ Bundle operation timed out")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Bundle operation failed: {str(e)}")
+        return False
+
+def main():
+    """Main function"""
+    try:
+        # Parse arguments
+        args = parse_arguments()
+        
+        # Set up logging level
+        if args.verbose:
+            logging.getLogger().setLevel(logging.DEBUG)
+        
+        logger.info("🚀 Starting Databricks Bundle Executor Script")
+        logger.info(f"Operation: {args.operation}")
+        logger.info(f"Target Environment: {args.target_env}")
+        
+        # Get values from arguments or environment variables
+        git_url = args.git_url
+        git_branch = args.git_branch
+        git_token = get_env_or_arg(args.git_token, 'GIT_TOKEN')
+        yaml_path = args.yaml_path
+        target_env = args.target_env
+        databricks_host = get_env_or_arg(args.databricks_host, 'DATABRICKS_HOST')
+        databricks_token = get_env_or_arg(args.databricks_token, 'DATABRICKS_TOKEN')
+        operation = args.operation
+        
+        # Parse connection configurations if provided
+        if args.git_connection_config:
+            git_config = parse_connection_config(args.git_connection_config)
+            if not git_token and git_config.get('personal_access_token'):
+                git_token = git_config['personal_access_token']
+                logger.info("🔐 Using Git token from connection config")
+        
+        if args.databricks_connection_config:
+            db_config = parse_connection_config(args.databricks_connection_config)
+            if not databricks_host and db_config.get('databricks_instance_url'):
+                databricks_host = db_config['databricks_instance_url']
+            if not databricks_token and db_config.get('personal_access_token'):
+                databricks_token = db_config['personal_access_token']
+            logger.info("🔧 Using Databricks config from connection config")
+        
+        # Validate required parameters
+        if not git_url:
+            logger.error("❌ Git URL is required")
+            sys.exit(1)
+        
+        if not yaml_path:
+            logger.error("❌ YAML path is required")
+            sys.exit(1)
+        
+        # Create temporary directory
+        temp_dir = tempfile.mkdtemp(prefix=f"bundle_{operation}_")
+        logger.info(f"📁 Created temporary directory: {temp_dir}")
+        
+        try:
+            # Step 1: Execute git clone
+            if not execute_git_clone(git_url, git_branch, git_token, temp_dir):
+                logger.error("❌ Git clone failed")
+                sys.exit(1)
+            
+            # Step 2: Navigate to yaml file directory
+            yaml_dir = os.path.dirname(yaml_path)
+            if yaml_dir:
+                work_dir = os.path.join(temp_dir, yaml_dir)
+                if os.path.exists(work_dir):
+                    logger.info(f"📂 Changed to directory: {work_dir}")
+                else:
+                    logger.warning(f"⚠️ Directory not found: {work_dir}, using root")
+                    work_dir = temp_dir
+            else:
+                work_dir = temp_dir
+                logger.info(f"📂 Using root directory: {work_dir}")
+            
+            # Step 3: Execute bundle operation
+            if not execute_bundle_operation(operation, target_env, work_dir, databricks_host, databricks_token):
+                logger.error("❌ Bundle operation failed")
+                sys.exit(1)
+            
+            logger.info("🎉 All operations completed successfully!")
+            
+        finally:
+            # Cleanup temporary directory
+            if os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                    logger.info(f"🧹 Cleaned up temporary directory: {temp_dir}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to cleanup temporary directory: {str(e)}")
+        
+    except KeyboardInterrupt:
+        logger.info("⏹️ Operation interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"❌ Unexpected error: {str(e)}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
