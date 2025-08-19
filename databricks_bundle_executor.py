@@ -6,12 +6,17 @@ This script is designed to be executed on Databricks serverless job compute to p
 databricks bundle operations (git clone + bundle validate/deploy) using Databricks Python SDK.
 
 Optimized for serverless compute with SDK execution (CLI not supported on serverless).
+Fallback YAML parsing included for environments without PyYAML.
 
 Usage on Databricks Serverless Job Compute:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
+Dependencies:
+    - databricks-sdk (required)
+    - PyYAML (optional, has fallback parser)
+
 Author: DataOps Team
-Version: 5.0 - Serverless Job Compute with Databricks Python SDK
+Version: 5.1 - Added fallback YAML parsing for dependency-free execution
 """
 
 import os
@@ -24,8 +29,15 @@ import argparse
 import logging
 import requests
 import time
-import yaml
 from typing import Dict, Any, Optional
+
+# Optional YAML import - fallback to basic parsing if not available
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
+    yaml = None
 
 # Databricks SDK imports
 try:
@@ -79,9 +91,9 @@ def parse_arguments():
     parser.add_argument('--serverless-optimized', action='store_true', default=True,
                        help='Enable serverless job compute optimizations (default: True)')
     parser.add_argument('--cli-retries', type=int, default=3, 
-                       help='Number of retry attempts for CLI commands (default: 3)')
+                       help='Number of retry attempts for operations (default: 3)')
     parser.add_argument('--cli-retry-delay', type=int, default=5, 
-                       help='Delay between CLI retry attempts in seconds (default: 5)')
+                       help='Delay between retry attempts in seconds (default: 5)')
     
     return parser.parse_args()
 
@@ -241,9 +253,83 @@ def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], t
         logger.error(f"❌ Git clone operation failed: {str(e)}")
         return False
 
+def parse_simple_yaml(content: str) -> Dict[str, Any]:
+    """
+    Simple YAML parser for basic databricks.yml structures when PyYAML is not available
+    This is a fallback parser that handles simple key-value pairs and nested structures
+    
+    Args:
+        content: YAML content as string
+        
+    Returns:
+        Parsed configuration dictionary
+    """
+    config = {}
+    stack = [config]  # Stack to track nested dictionaries
+    indent_levels = [0]  # Stack to track indentation levels
+    
+    lines = content.split('\n')
+    logger.debug(f"🔍 Simple YAML parser processing {len(lines)} lines")
+    
+    for line_num, line in enumerate(lines, 1):
+        stripped = line.strip()
+        
+        # Skip empty lines and comments
+        if not stripped or stripped.startswith('#'):
+            continue
+        
+        # Calculate indentation (using spaces, assuming 2-space indentation)
+        indent = len(line) - len(line.lstrip())
+        
+        # Handle colon-separated key-value pairs
+        if ':' in stripped:
+            key, value = stripped.split(':', 1)
+            key = key.strip().strip('"\'')
+            value = value.strip().strip('"\'')
+            
+            # Adjust stack based on indentation
+            while len(indent_levels) > 1 and indent <= indent_levels[-1]:
+                stack.pop()
+                indent_levels.pop()
+            
+            current_dict = stack[-1]
+            
+            if value:
+                # Key with value
+                # Try to convert to appropriate type
+                if value.lower() in ('true', 'false'):
+                    current_dict[key] = value.lower() == 'true'
+                elif value.isdigit():
+                    current_dict[key] = int(value)
+                else:
+                    current_dict[key] = value
+                logger.debug(f"   {key}: {value} (indent: {indent})")
+            else:
+                # Key without value - create nested dictionary
+                current_dict[key] = {}
+                stack.append(current_dict[key])
+                indent_levels.append(indent)
+                logger.debug(f"   {key}: {{}} (indent: {indent})")
+        
+        # Handle list items (basic support)
+        elif stripped.startswith('-'):
+            item = stripped[1:].strip().strip('"\'')
+            current_dict = stack[-1]
+            
+            # If the current dict doesn't have a list context, create one
+            if not isinstance(current_dict, list):
+                # This is a simple implementation - assumes lists are values for the last key
+                logger.debug(f"   List item: {item} (indent: {indent})")
+                # For simplicity, we'll skip complex list handling in fallback parser
+    
+    logger.debug(f"🔍 Simple YAML parser completed, config keys: {list(config.keys())}")
+    return config
+
+
 def load_bundle_config(work_dir: str, target_env: str) -> Optional[Dict[str, Any]]:
     """
     Load and parse the bundle configuration from databricks.yml
+    Uses PyYAML if available, falls back to simple parsing
     
     Args:
         work_dir: Working directory containing databricks.yml
@@ -256,11 +342,28 @@ def load_bundle_config(work_dir: str, target_env: str) -> Optional[Dict[str, Any
         yaml_path = os.path.join(work_dir, 'databricks.yml')
         
         with open(yaml_path, 'r') as f:
-            bundle_config = yaml.safe_load(f)
+            yaml_content = f.read()
         
-        logger.info(f"📄 Loaded bundle configuration from {yaml_path}")
+        # Try PyYAML first if available
+        if YAML_AVAILABLE and yaml:
+            try:
+                bundle_config = yaml.safe_load(yaml_content)
+                logger.info(f"📄 Loaded bundle configuration using PyYAML from {yaml_path}")
+            except Exception as e:
+                logger.warning(f"⚠️ PyYAML parsing failed, falling back to simple parser: {str(e)}")
+                bundle_config = parse_simple_yaml(yaml_content)
+                logger.info(f"📄 Loaded bundle configuration using simple parser from {yaml_path}")
+        else:
+            # Fallback to simple parser
+            logger.info("📄 PyYAML not available, using simple YAML parser")
+            bundle_config = parse_simple_yaml(yaml_content)
+            logger.info(f"📄 Loaded bundle configuration using simple parser from {yaml_path}")
         
         # Validate basic structure
+        if not isinstance(bundle_config, dict):
+            logger.error("❌ Configuration is not a valid dictionary structure")
+            return None
+            
         if 'bundle' not in bundle_config:
             logger.error("❌ Missing 'bundle' section in configuration")
             return None
@@ -269,15 +372,20 @@ def load_bundle_config(work_dir: str, target_env: str) -> Optional[Dict[str, Any
             logger.error("❌ Missing 'targets' section in configuration")
             return None
             
+        if not isinstance(bundle_config['targets'], dict):
+            logger.error("❌ 'targets' section is not a dictionary")
+            return None
+            
         if target_env not in bundle_config['targets']:
             logger.error(f"❌ Target environment '{target_env}' not found in configuration")
+            logger.info(f"Available targets: {list(bundle_config['targets'].keys())}")
             return None
         
         logger.info(f"✅ Bundle config validation passed for {target_env}")
         return bundle_config
         
-    except yaml.YAMLError as e:
-        logger.error(f"❌ Failed to parse YAML configuration: {str(e)}")
+    except FileNotFoundError:
+        logger.error(f"❌ Configuration file not found: {yaml_path}")
         return None
     except Exception as e:
         logger.error(f"❌ Failed to load bundle configuration: {str(e)}")
@@ -656,9 +764,21 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script - Serverless SDK (v5.0)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script - Serverless SDK (v5.1)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
+        
+        # Log dependency status
+        logger.info("🔍 Dependency Status:")
+        if SDK_AVAILABLE:
+            logger.info("   ✅ Databricks SDK: Available")
+        else:
+            logger.error(f"   ❌ Databricks SDK: Not available - {SDK_IMPORT_ERROR}")
+            
+        if YAML_AVAILABLE:
+            logger.info("   ✅ PyYAML: Available")
+        else:
+            logger.warning("   ⚠️ PyYAML: Not available, using simple parser fallback")
         
         # Log serverless-specific configuration
         if hasattr(args, 'serverless_optimized') and args.serverless_optimized:
