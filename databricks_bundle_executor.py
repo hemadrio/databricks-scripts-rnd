@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 6.6 - Added Serverless Compute Support
+Version: 6.8 - Dynamic CLI Download for Serverless Support
 """
 
 import os
@@ -240,10 +240,52 @@ def create_databricks_config(env_vars: Dict[str, str]) -> str:
         logger.error(f"❌ Failed to create Databricks config: {str(e)}")
         return None
 
+def download_and_setup_cli(tmp_dir: str) -> str:
+    """
+    Download and setup Databricks CLI in temporary directory
+    
+    Args:
+        tmp_dir: Temporary directory path
+        
+    Returns:
+        Path to the CLI executable
+    """
+    try:
+        logger.info("📥 Downloading Databricks CLI...")
+        
+        # Download CLI
+        zip_path = os.path.join(tmp_dir, "databricks.zip")
+        download_cmd = [
+            "curl", "-L", "-o", zip_path,
+            "https://github.com/databricks/cli/releases/latest/download/databricks_linux_amd64.zip"
+        ]
+        
+        logger.info(f"Executing: {' '.join(download_cmd)}")
+        subprocess.check_call(download_cmd, timeout=300)
+        
+        # Extract CLI
+        logger.info("📦 Extracting Databricks CLI...")
+        extract_cmd = ["unzip", "-q", zip_path, "-d", tmp_dir]
+        subprocess.check_call(extract_cmd, timeout=60)
+        
+        # Make CLI executable
+        cli_path = os.path.join(tmp_dir, "databricks")
+        os.chmod(cli_path, 0o755)
+        
+        logger.info(f"✅ Databricks CLI downloaded and setup at: {cli_path}")
+        return cli_path
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"❌ Failed to download/setup CLI: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ CLI setup error: {str(e)}")
+        return None
+
 def execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
                            env_vars: Dict[str, str]) -> bool:
     """
-    Execute databricks bundle operation using Python SDK
+    Execute databricks bundle operation using downloaded CLI
     
     Args:
         operation: Bundle operation (validate, deploy, etc.)
@@ -271,132 +313,77 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         except Exception as e:
             logger.warning(f"⚠️ Could not list files in working directory: {str(e)}")
         
-        # Debug: Check environment
-        logger.info(f"🔍 Environment check:")
-        logger.info(f"   TERM: {os.environ.get('TERM', 'NOT_SET')}")
-        logger.info(f"   TTY: {os.environ.get('TTY', 'NOT_SET')}")
-        logger.info(f"   PYTHONPATH: {os.environ.get('PYTHONPATH', 'NOT_SET')}")
-        logger.info(f"   DATABRICKS_HOST: {env_vars.get('DATABRICKS_HOST', 'NOT_SET')}")
-        
         # Set up environment variables
         env = os.environ.copy()
         env.update(env_vars)
         
-        # Add serverless and non-interactive environment variables
-        env.update({
-            'DATABRICKS_CLI_FORCE_NONINTERACTIVE': '1',
-            'DATABRICKS_CLI_NONINTERACTIVE': '1',
-            'DATABRICKS_CLI_BATCH_MODE': '1',
-            'DATABRICKS_SERVERLESS_COMPUTE_ID': 'auto',  # Critical for serverless compute
-            'CI': 'true',  # Continuous Integration mode
-            'DEBIAN_FRONTEND': 'noninteractive',
-            'TERM': 'dumb'
-        })
+        # Create temporary directory for CLI
+        cli_tmp_dir = tempfile.mkdtemp(prefix="databricks_cli_")
+        logger.info(f"📁 Created CLI temporary directory: {cli_tmp_dir}")
         
-        # Create Databricks config file for serverless authentication
-        config_path = create_databricks_config(env_vars)
-        if config_path:
-            env['DATABRICKS_CONFIG_FILE'] = config_path
-            logger.info(f"🔧 Using Databricks config file: {config_path}")
-        
-        # Try CLI with serverless and non-interactive approach first
-        logger.info("🔧 Attempting Databricks CLI with serverless non-interactive approach...")
-        
-        # Approach 1: Try with serverless-specific flags (PRIORITY)
-        logger.info("🔧 Approach 1: Using serverless non-interactive mode...")
-        
-        # Try different serverless non-interactive approaches
-        noninteractive_attempts = [
-            f"databricks bundle {operation} -t {target_env} --output json",  # Basic command first
-            f"databricks bundle {operation} -t {target_env} --output text",   # Try text output
-            f"databricks bundle {operation} -t {target_env}",                # Minimal command
-            f"DATABRICKS_CLI_CONFIGURE_TOKEN='' databricks bundle {operation} -t {target_env} --output json",  # Force no config prompt
-            f"echo '' | databricks bundle {operation} -t {target_env} --output json"  # Pipe empty input
-        ]
-        
-        for i, cmd in enumerate(noninteractive_attempts, 1):
-            logger.info(f"🔧 Attempt 1.{i}: {cmd}")
+        try:
+            # Download and setup Databricks CLI
+            cli_path = download_and_setup_cli(cli_tmp_dir)
+            if not cli_path:
+                logger.error("❌ Failed to setup Databricks CLI")
+                return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
+            
+            # Test CLI execution
+            logger.info("🔧 Testing Databricks CLI...")
+            version_cmd = [cli_path, "version"]
+            version_result = subprocess.run(
+                version_cmd, capture_output=True, text=True, timeout=30, env=env
+            )
+            
+            if version_result.returncode == 0:
+                logger.info(f"✅ CLI version check successful: {version_result.stdout.strip()}")
+            else:
+                logger.warning(f"⚠️ CLI version check failed: {version_result.stderr}")
+            
+            # Execute bundle operation using downloaded CLI
+            logger.info(f"🔧 Executing bundle {operation} with downloaded CLI...")
+            bundle_cmd = [cli_path, "bundle", operation]
+            
+            if target_env:
+                bundle_cmd.extend(["-t", target_env])
+            
+            logger.info(f"Executing: {' '.join(bundle_cmd)}")
             
             bundle_result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True, timeout=600, 
+                bundle_cmd, capture_output=True, text=True, timeout=600, 
                 cwd=work_dir, env=env
             )
             
             if bundle_result.returncode == 0:
-                logger.info(f"✅ CLI operation completed successfully with non-interactive approach {i}")
+                logger.info("✅ Bundle operation completed successfully with downloaded CLI!")
                 if bundle_result.stdout:
-                    logger.info(f"📄 Output: {bundle_result.stdout}")
+                    logger.info(f"📄 CLI Output:\n{bundle_result.stdout}")
                 return True
             else:
-                logger.warning(f"⚠️ Non-interactive attempt {i} failed: {bundle_result.returncode}")
+                logger.error(f"❌ Bundle operation failed with return code: {bundle_result.returncode}")
                 if bundle_result.stderr:
-                    logger.warning(f"Error: {bundle_result.stderr}")
-        
-        logger.error("❌ All non-interactive approaches failed")
-        
-        # Approach 2: Try with basic flags (fallback)
-        logger.info("🔧 Approach 2: Using basic CLI command...")
-        bundle_cmd_basic = f"databricks bundle {operation} -t {target_env}"
-        logger.info(f"Executing: {bundle_cmd_basic}")
-        
-        bundle_result = subprocess.run(
-            bundle_cmd_basic, shell=True, capture_output=True, text=True, timeout=600, 
-            cwd=work_dir, env=env
-        )
-        
-        if bundle_result.returncode == 0:
-            logger.info("✅ CLI operation completed successfully with basic approach")
-            if bundle_result.stdout:
-                logger.info(f"📄 Output: {bundle_result.stdout}")
-            return True
-        
-        # Approach 3: Try with interactive environment variables (last resort)
-        logger.info("🔧 Approach 3: Setting interactive environment variables...")
-        interactive_env = env.copy()
-        interactive_env.update({
-            'TERM': 'xterm-256color',
-            'TTY': '/dev/tty',
-            'FORCE_COLOR': '1',
-            'DATABRICKS_CLI_FORCE_INTERACTIVE': '1'
-        })
-        
-        # Try CLI with interactive flags
-        bundle_cmd_interactive = f"databricks bundle {operation} -t {target_env} --output json --force-interactive"
-        logger.info(f"Executing: {bundle_cmd_interactive}")
-        
-        bundle_result = subprocess.run(
-            bundle_cmd_interactive, shell=True, capture_output=True, text=True, timeout=600, 
-            cwd=work_dir, env=interactive_env
-        )
-        
-        if bundle_result.returncode == 0:
-            logger.info("✅ CLI operation completed successfully with interactive approach")
-            if bundle_result.stdout:
-                logger.info(f"📄 Output: {bundle_result.stdout}")
-            return True
-        
-        if bundle_result.returncode == 0:
-            logger.info("✅ CLI operation completed successfully with basic approach")
-            if bundle_result.stdout:
-                logger.info(f"📄 Output: {bundle_result.stdout}")
-            return True
-        else:
-            logger.error(f"❌ All CLI approaches failed with return code: {bundle_result.returncode}")
-            if bundle_result.stderr:
-                logger.error(f"Error output: {bundle_result.stderr}")
-            if bundle_result.stdout:
-                logger.error(f"Standard output: {bundle_result.stdout}")
-            
-            # If CLI fails, try REST API approach
-            logger.info("🔄 CLI failed, trying REST API approach...")
-            return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
+                    logger.error(f"CLI Error: {bundle_result.stderr}")
+                if bundle_result.stdout:
+                    logger.error(f"CLI Output: {bundle_result.stdout}")
+                
+                # If CLI fails, try REST API approach
+                logger.info("🔄 Downloaded CLI failed, trying REST API approach...")
+                return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
+                
+        finally:
+            # Cleanup CLI temporary directory
+            try:
+                shutil.rmtree(cli_tmp_dir, ignore_errors=True)
+                logger.info(f"🧹 Cleaned up CLI directory: {cli_tmp_dir}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to cleanup CLI directory: {str(e)}")
         
     except subprocess.TimeoutExpired:
         logger.error("⏰ Bundle operation timed out")
         return False
     except Exception as e:
         logger.error(f"❌ Bundle operation failed: {str(e)}")
-        return False
+        return execute_bundle_operation_sdk(operation, target_env, work_dir, env_vars)
 
 def execute_bundle_operation_sdk(operation: str, target_env: str, work_dir: str, 
                                env_vars: Dict[str, str]) -> bool:
