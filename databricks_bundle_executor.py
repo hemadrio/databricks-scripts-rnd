@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.7 - CLI with v0.264.2 Download (Fixed URLs)
+Version: 8.8 - CLI with Hardcoded YAML Test
 """
 
 import os
@@ -637,6 +637,42 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
             
             # Execute bundle operation
             logger.info(f"🚀 Executing bundle {operation} with downloaded CLI...")
+            
+            # Create a hardcoded databricks.yml for testing
+            hardcoded_yaml_path = os.path.join(temp_cli_dir, "databricks.yml")
+            hardcoded_yaml_content = f"""bundle:
+  name: test_bundle
+  
+targets:
+  {target_env}:
+    mode: development
+    workspace:
+      host: {env_vars.get('DATABRICKS_HOST', 'https://dbc-3da7f034-dce2.cloud.databricks.com')}
+      auth_type: oauth
+    
+resources:
+  jobs:
+    test_job:
+      name: "Test Bundle Job - ${{bundle.target}}"
+      tasks:
+        - task_key: "main_task"
+          python_wheel_task:
+            package_name: "my_package"
+            entry_point: "main"
+          new_cluster:
+            spark_version: "13.3.x-scala2.12"
+            node_type_id: "i3.xlarge"
+            num_workers: 1
+"""
+            
+            with open(hardcoded_yaml_path, 'w') as f:
+                f.write(hardcoded_yaml_content)
+            
+            logger.info(f"📋 Created hardcoded databricks.yml for testing:")
+            logger.info(f"   Host: {env_vars.get('DATABRICKS_HOST', 'https://dbc-3da7f034-dce2.cloud.databricks.com')}")
+            logger.info(f"   Target: {target_env}")
+            logger.info(f"   Config file: {hardcoded_yaml_path}")
+            
             bundle_cmd = [cli_path, "bundle", operation]
             
             if target_env:
@@ -650,7 +686,7 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
             
             bundle_result = subprocess.run(
                 bundle_cmd, capture_output=True, text=True, timeout=600,
-                cwd=work_dir, env=env
+                cwd=temp_cli_dir, env=env
             )
             
             if bundle_result.returncode == 0:
@@ -939,7 +975,7 @@ if __name__ == "__main__":
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.7)")
+    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.8)")
     logger.info(f"Operation: {args.operation}")
     logger.info(f"Target Environment: {args.target_env}")
     
