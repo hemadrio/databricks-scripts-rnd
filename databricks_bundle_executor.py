@@ -253,11 +253,21 @@ def download_and_setup_cli(tmp_dir: str) -> str:
     try:
         logger.info("📥 Downloading Databricks CLI...")
         
-        # Download CLI
+        # Download CLI - detect platform
         zip_path = os.path.join(tmp_dir, "databricks.zip")
+        
+        import platform
+        system = platform.system().lower()
+        
+        if system == "darwin":
+            cli_url = "https://github.com/databricks/cli/releases/latest/download/databricks_darwin_amd64.zip"
+        elif system == "linux":
+            cli_url = "https://github.com/databricks/cli/releases/latest/download/databricks_linux_amd64.zip"
+        else:
+            raise Exception(f"Unsupported platform: {system}")
+        
         download_cmd = [
-            "curl", "-L", "-o", zip_path,
-            "https://github.com/databricks/cli/releases/latest/download/databricks_linux_amd64.zip"
+            "curl", "-L", "-o", zip_path, cli_url
         ]
         
         logger.info(f"Executing: {' '.join(download_cmd)}")
