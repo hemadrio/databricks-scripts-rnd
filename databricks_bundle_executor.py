@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.4 - CLI with REST API Fallback
+Version: 8.5 - CLI with Modern CLI Download Fallback
 """
 
 import os
@@ -512,64 +512,40 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
                 if bundle_result.stdout:
                     logger.error(f"CLI Output: {bundle_result.stdout}")
                 
-                logger.warning("⚠️ CLI failed - attempting REST API fallback...")
-                logger.info("🔄 Falling back to REST API implementation")
+                logger.warning("⚠️ CLI failed - attempting CLI download fallback...")
+                logger.info("🔄 Downloading modern CLI with bundle support")
                 
-                # Fall back to REST API implementation
-                if operation == "validate":
-                    return execute_bundle_validation_api(work_dir, env_vars)
-                elif operation in ["deploy", "destroy", "run"]:
-                    return execute_bundle_deployment_api(operation, target_env, work_dir, env_vars)
-                else:
-                    logger.error(f"❌ Unsupported operation: {operation}")
-                    return False
+                # Fall back to downloading modern CLI
+                return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
                 
         except Exception as e:
             logger.error(f"❌ CLI inspection or operation failed: {str(e)}")
-            logger.warning("⚠️ CLI failed - attempting REST API fallback...")
-            logger.info("🔄 Falling back to REST API implementation")
+            logger.warning("⚠️ CLI failed - attempting CLI download fallback...")
+            logger.info("🔄 Downloading modern CLI with bundle support")
             
-            # Fall back to REST API implementation
-            if operation == "validate":
-                return execute_bundle_validation_api(work_dir, env_vars)
-            elif operation in ["deploy", "destroy", "run"]:
-                return execute_bundle_deployment_api(operation, target_env, work_dir, env_vars)
-            else:
-                logger.error(f"❌ Unsupported operation: {operation}")
-                return False
+            # Fall back to downloading modern CLI
+            return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
         
     except subprocess.TimeoutExpired:
         logger.error("⏰ Bundle operation timed out")
-        logger.warning("⚠️ CLI timeout - attempting REST API fallback...")
-        logger.info("🔄 Falling back to REST API implementation")
+        logger.warning("⚠️ CLI timeout - attempting CLI download fallback...")
+        logger.info("🔄 Downloading modern CLI with bundle support")
         
-        # Fall back to REST API implementation after timeout
-        if operation == "validate":
-            return execute_bundle_validation_api(work_dir, env_vars)
-        elif operation in ["deploy", "destroy", "run"]:
-            return execute_bundle_deployment_api(operation, target_env, work_dir, env_vars)
-        else:
-            logger.error(f"❌ Unsupported operation: {operation}")
-            return False
+        # Fall back to downloading modern CLI after timeout
+        return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
             
     except Exception as e:
         logger.error(f"❌ Bundle operation failed: {str(e)}")
-        logger.warning("⚠️ General error - attempting REST API fallback...")
-        logger.info("🔄 Falling back to REST API implementation")
+        logger.warning("⚠️ General error - attempting CLI download fallback...")
+        logger.info("🔄 Downloading modern CLI with bundle support")
         
-        # Fall back to REST API implementation after general error
-        if operation == "validate":
-            return execute_bundle_validation_api(work_dir, env_vars)
-        elif operation in ["deploy", "destroy", "run"]:
-            return execute_bundle_deployment_api(operation, target_env, work_dir, env_vars)
-        else:
-            logger.error(f"❌ Unsupported operation: {operation}")
-            return False
+        # Fall back to downloading modern CLI after general error
+        return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
 
-def execute_bundle_operation_sdk(operation: str, target_env: str, work_dir: str, 
-                               env_vars: Dict[str, str]) -> bool:
+def download_and_execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
+                                        env_vars: Dict[str, str]) -> bool:
     """
-    Execute databricks bundle operation using REST API (no SDK)
+    Download modern Databricks CLI and execute bundle operation
     
     Args:
         operation: Bundle operation (validate, deploy, etc.)
@@ -580,42 +556,108 @@ def execute_bundle_operation_sdk(operation: str, target_env: str, work_dir: str,
     Returns:
         True if successful, False otherwise
     """
+    import platform
+    import requests
+    import tempfile
+    import shutil
+    
     try:
-        logger.info("🔧 Using REST API for bundle operations (no SDK)")
+        logger.info("📥 Downloading modern Databricks CLI with bundle support...")
         
-        # Read bundle configuration
-        yaml_path = os.path.join(work_dir, 'databricks.yml')
-        if not os.path.exists(yaml_path):
-            logger.error(f"❌ databricks.yml not found at {yaml_path}")
-            return False
-            
-        with open(yaml_path, 'r') as f:
-            yaml_content = f.read()
-        logger.info(f"📄 Bundle configuration loaded from {yaml_path}")
-        
-        # Perform bundle operation based on type
-        if operation == 'validate':
-            logger.info("🔍 Validating bundle configuration...")
-            return execute_bundle_validation(yaml_content, target_env, env_vars)
-            
-        elif operation == 'deploy':
-            logger.info("🚀 Deploying bundle using REST API...")
-            return execute_bundle_deployment_api(operation, target_env, work_dir, env_vars)
-            
-        elif operation == 'destroy':
-            logger.info("🗑️ Destroying bundle using REST API...")
-            return execute_bundle_deployment_api(operation, target_env, work_dir, env_vars)
-            
-        elif operation == 'run':
-            logger.info("🏃 Running bundle using REST API...")
-            return execute_bundle_deployment_api(operation, target_env, work_dir, env_vars)
-            
+        # Determine platform and download URL
+        system = platform.system().lower()
+        if system == "linux":
+            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_linux_amd64.zip"
+        elif system == "darwin":
+            cli_url = "https://github.com/databricks/cli/releases/download/v0.230.0/databricks_darwin_amd64.zip"
         else:
-            logger.error(f"❌ Unsupported operation: {operation}")
+            logger.error(f"❌ Unsupported platform: {system}")
             return False
+        
+        # Create temporary directory for CLI
+        temp_cli_dir = tempfile.mkdtemp(prefix="databricks_cli_")
+        logger.info(f"📁 Created temporary CLI directory: {temp_cli_dir}")
+        
+        try:
+            # Download CLI
+            zip_path = os.path.join(temp_cli_dir, "databricks.zip")
+            logger.info(f"🌐 Downloading CLI from: {cli_url}")
+            
+            response = requests.get(cli_url, timeout=120)
+            response.raise_for_status()
+            
+            with open(zip_path, 'wb') as f:
+                f.write(response.content)
+            
+            logger.info(f"✅ CLI downloaded successfully ({len(response.content)} bytes)")
+            
+            # Extract CLI
+            logger.info("📦 Extracting CLI...")
+            result = subprocess.run(
+                ["unzip", "-q", zip_path, "-d", temp_cli_dir],
+                capture_output=True, text=True, timeout=30
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"❌ Failed to extract CLI: {result.stderr}")
+                return False
+            
+            # Set executable permissions
+            cli_path = os.path.join(temp_cli_dir, "databricks")
+            os.chmod(cli_path, 0o755)
+            logger.info(f"🔧 CLI ready at: {cli_path}")
+            
+            # Test CLI
+            version_result = subprocess.run(
+                [cli_path, "version"], capture_output=True, text=True, timeout=30, env=env_vars
+            )
+            
+            if version_result.returncode == 0:
+                logger.info(f"✅ Modern CLI version: {version_result.stdout.strip()}")
+            else:
+                logger.warning(f"⚠️ CLI version check failed: {version_result.stderr}")
+            
+            # Execute bundle operation
+            logger.info(f"🚀 Executing bundle {operation} with downloaded CLI...")
+            bundle_cmd = [cli_path, "bundle", operation]
+            
+            if target_env:
+                bundle_cmd.extend(["-t", target_env])
+            
+            logger.info(f"Executing: {' '.join(bundle_cmd)}")
+            
+            # Set up environment
+            env = os.environ.copy()
+            env.update(env_vars)
+            
+            bundle_result = subprocess.run(
+                bundle_cmd, capture_output=True, text=True, timeout=600,
+                cwd=work_dir, env=env
+            )
+            
+            if bundle_result.returncode == 0:
+                logger.info("✅ Bundle operation completed successfully with downloaded CLI!")
+                if bundle_result.stdout:
+                    logger.info(f"📄 CLI Output:\n{bundle_result.stdout}")
+                return True
+            else:
+                logger.error(f"❌ Bundle operation failed with return code: {bundle_result.returncode}")
+                if bundle_result.stderr:
+                    logger.error(f"CLI Error: {bundle_result.stderr}")
+                if bundle_result.stdout:
+                    logger.error(f"CLI Output: {bundle_result.stdout}")
+                return False
+                
+        finally:
+            # Cleanup temporary directory
+            try:
+                shutil.rmtree(temp_cli_dir)
+                logger.info(f"🧹 Cleaned up temporary CLI directory: {temp_cli_dir}")
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️ Failed to cleanup temp directory: {cleanup_error}")
         
     except Exception as e:
-        logger.error(f"❌ Bundle operation failed: {str(e)}")
+        logger.error(f"❌ CLI download and execution failed: {str(e)}")
         return False
 
 def execute_hardcoded_yaml_test(yaml_content: str, target_env: str, env_vars: Dict[str, str]) -> bool:
@@ -868,261 +910,100 @@ def execute_bundle_validation(yaml_content: str, target_env: str, env_vars: Dict
         logger.error(f"❌ Validation failed: {str(e)}")
         return False
 
-def execute_bundle_validation_api(work_dir: str, env_vars: Dict[str, str]) -> bool:
-    """
-    Execute bundle validation using Databricks REST API
-    
-    Args:
-        work_dir: Working directory containing databricks.yml
-        env_vars: Environment variables for authentication
-        
-    Returns:
-        bool: True if validation successful, False otherwise
-    """
-    try:
-        logger.info("🔄 Starting REST API bundle validation...")
-        
-        # Get authentication details
-        host = env_vars.get('DATABRICKS_HOST')
-        client_id = env_vars.get('DATABRICKS_CLIENT_ID')
-        client_secret = env_vars.get('DATABRICKS_CLIENT_SECRET')
-        
-        if not host or not client_id or not client_secret:
-            logger.error("❌ Missing required authentication environment variables")
-            return False
-        
-        # Read and validate databricks.yml exists
-        yaml_path = os.path.join(work_dir, 'databricks.yml')
-        if not os.path.exists(yaml_path):
-            logger.error(f"❌ databricks.yml not found at {yaml_path}")
-            return False
-        
-        logger.info("✅ REST API Bundle validation successful!")
-        logger.info("📄 Bundle structure validation completed via API")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ REST API validation failed: {str(e)}")
-        return False
-
-def execute_bundle_deployment_api(operation: str, target_env: str, work_dir: str, 
-                                env_vars: Dict[str, str]) -> bool:
-    """
-    Execute bundle deployment using Databricks REST API
-    
-    Args:
-        operation: Bundle operation (deploy, destroy, run)
-        target_env: Target environment
-        work_dir: Working directory
-        env_vars: Environment variables for Databricks authentication
-        
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        logger.info("🚀 Using Databricks REST API for bundle deployment")
-        
-        # Set up authentication
-        workspace_url = f"https://{env_vars.get('DATABRICKS_HOST')}"
-        client_id = env_vars.get('DATABRICKS_CLIENT_ID')
-        client_secret = env_vars.get('DATABRICKS_CLIENT_SECRET')
-        
-        logger.info(f"🔗 Target workspace: {workspace_url}")
-        logger.info(f"🔗 Target environment: {target_env}")
-        
-        # For actual deployment, you would:
-        # 1. Create a bundle archive
-        # 2. Upload it to DBFS or Unity Catalog
-        # 3. Call the bundle deployment API
-        
-        if operation == 'deploy':
-            logger.info("📦 Bundle deployment process:")
-            logger.info("   1. Creating bundle archive...")
-            logger.info("   2. Uploading to workspace...")
-            logger.info("   3. Calling deployment API...")
-            logger.info("   4. Monitoring deployment status...")
-            
-            # Actual REST API implementation
-            try:
-                import requests
-                
-                logger.info("🔐 Getting access token...")
-                # Get access token using Service Principal
-                token_url = f"{workspace_url}/oidc/v1/token"
-                token_response = requests.post(token_url, data={
-                    'grant_type': 'client_credentials',
-                    'client_id': client_id,
-                    'client_secret': client_secret
-                }, timeout=30)
-                
-                if token_response.status_code != 200:
-                    logger.error(f"❌ Failed to get access token: {token_response.text}")
-                    return False
-                    
-                access_token = token_response.json()['access_token']
-                logger.info("✅ Access token obtained successfully")
-                
-                logger.info("🚀 Calling bundle deployment API...")
-                # Deploy bundle using REST API
-                deploy_url = f"{workspace_url}/api/2.0/bundles/deploy"
-                headers = {
-                    'Authorization': f'Bearer {access_token}',
-                    'Content-Type': 'application/json'
-                }
-                
-                # Create deployment payload
-                deploy_payload = {
-                    'bundle_path': f"dbfs:/bundles/my-bundle-{target_env}",
-                    'target': target_env,
-                    'variables': {
-                        'job_name': 'deployed-job',
-                        'catalog_name': 'deployed-catalog'
-                    }
-                }
-                
-                deploy_response = requests.post(deploy_url, headers=headers, json=deploy_payload, timeout=60)
-                
-                if deploy_response.status_code == 200:
-                    logger.info("✅ Bundle deployed successfully!")
-                    logger.info(f"📄 Response: {deploy_response.json()}")
-                    return True
-                else:
-                    logger.error(f"❌ Deployment failed: HTTP {deploy_response.status_code}")
-                    logger.error(f"📄 Error response: {deploy_response.text}")
-                    return False
-                    
-            except requests.exceptions.RequestException as e:
-                logger.error(f"❌ API request failed: {str(e)}")
-                return False
-            except Exception as e:
-                logger.error(f"❌ Deployment error: {str(e)}")
-                return False
-            return True
-            
-        elif operation == 'destroy':
-            logger.info("🗑️ Bundle destroy process:")
-            logger.info("   1. Identifying bundle resources...")
-            logger.info("   2. Calling destroy API...")
-            logger.info("   3. Cleaning up resources...")
-            
-            logger.info("✅ Bundle destroy simulation completed")
-            return True
-            
-        elif operation == 'run':
-            logger.info("🏃 Bundle run process:")
-            logger.info("   1. Starting bundle jobs...")
-            logger.info("   2. Monitoring job execution...")
-            logger.info("   3. Collecting results...")
-            
-            logger.info("✅ Bundle run simulation completed")
-            return True
-            
-        else:
-            logger.error(f"❌ Unsupported operation: {operation}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ API deployment failed: {str(e)}")
-        return False
-
-def main():
-    """Main function"""
-    try:
-        # Parse arguments
-        args = parse_arguments()
-        
-        # Set up logging level
-        if args.verbose:
-            logging.getLogger().setLevel(logging.DEBUG)
-        
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v8.4)")
-        logger.info(f"Operation: {args.operation}")
-        logger.info(f"Target Environment: {args.target_env}")
-        
-        # Get values from arguments or environment variables
-        git_url = args.git_url
-        git_branch = args.git_branch
-        git_token = get_env_or_arg(args.git_token, 'GIT_TOKEN')
-        yaml_path = args.yaml_path
-        target_env = args.target_env
-        databricks_host = get_env_or_arg(args.databricks_host, 'DATABRICKS_HOST')
-        databricks_token = get_env_or_arg(args.databricks_token, 'DATABRICKS_TOKEN')
-        operation = args.operation
-        
-        # Parse connection configurations if provided
-        git_config = {}
-        db_config = {}
-        
-        if args.git_connection_config:
-            git_config = parse_connection_config(args.git_connection_config)
-            if not git_token and git_config.get('personal_access_token'):
-                git_token = git_config['personal_access_token']
-                logger.info("🔐 Using Git token from connection config")
-        
-        if args.databricks_connection_config:
-            db_config = parse_connection_config(args.databricks_connection_config)
-            logger.info("🔧 Using Databricks config from connection config")
-        
-        # Setup Databricks authentication
-        env_vars = setup_databricks_authentication(db_config, databricks_host, databricks_token)
-        if not env_vars:
-            logger.error("❌ Failed to setup Databricks authentication")
-            sys.exit(1)
-        
-        # Validate required parameters
-        if not git_url:
-            logger.error("❌ Git URL is required")
-            sys.exit(1)
-        
-        if not yaml_path:
-            logger.error("❌ YAML path is required")
-            sys.exit(1)
-        
-        # Create temporary directory
-        temp_dir = tempfile.mkdtemp(prefix=f"bundle_{operation}_")
-        logger.info(f"📁 Created temporary directory: {temp_dir}")
-        
-        try:
-            # Step 1: Execute git clone
-            if not execute_git_clone(git_url, git_branch, git_token, temp_dir):
-                logger.error("❌ Git clone failed")
-                sys.exit(1)
-            
-            # Step 2: Navigate to yaml file directory
-            yaml_dir = os.path.dirname(yaml_path)
-            if yaml_dir:
-                work_dir = os.path.join(temp_dir, yaml_dir)
-                if os.path.exists(work_dir):
-                    logger.info(f"📂 Changed to directory: {work_dir}")
-                else:
-                    logger.warning(f"⚠️ Directory not found: {work_dir}, using root")
-                    work_dir = temp_dir
-            else:
-                work_dir = temp_dir
-                logger.info(f"📂 Using root directory: {work_dir}")
-            
-            # Step 3: Execute bundle operation
-            if not execute_bundle_operation(operation, target_env, work_dir, env_vars):
-                logger.error("❌ Bundle operation failed")
-                sys.exit(1)
-            
-            logger.info("🎉 All operations completed successfully!")
-            
-        finally:
-            # Cleanup temporary directory
-            if os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir)
-                    logger.info(f"🧹 Cleaned up temporary directory: {temp_dir}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to cleanup temporary directory: {str(e)}")
-        
-    except KeyboardInterrupt:
-        logger.info("⏹️ Operation interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        logger.error(f"❌ Unexpected error: {str(e)}")
-        sys.exit(1)
-
+# Main execution  
 if __name__ == "__main__":
-    main()
+    """Main execution function"""
+    
+    # Parse command line arguments  
+    args = parse_arguments()
+    
+    # Set up logging level
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.5)")
+    logger.info(f"Operation: {args.operation}")
+    logger.info(f"Target Environment: {args.target_env}")
+    
+    # Get values from arguments or environment variables
+    git_url = args.git_url
+    git_branch = args.git_branch
+    git_token = args.git_token
+    yaml_path = args.yaml_path
+    operation = args.operation
+    target_env = args.target_env
+    databricks_host = args.databricks_host
+    databricks_token = args.databricks_token
+    
+    # Parse connection configurations if provided
+    git_config = {}
+    db_config = {}
+    
+    if args.git_connection_config:
+        git_config = parse_connection_config(args.git_connection_config)
+        logger.info("🔧 Using Git config from connection config")
+        
+        # Use token from connection config if not provided
+        if not git_token and git_config.get('token'):
+            git_token = git_config['token']
+            logger.info("🔐 Using Git token from connection config")
+        if not git_token and git_config.get('personal_access_token'):
+            git_token = git_config['personal_access_token']
+            logger.info("🔐 Using Git token from connection config")
+    
+    if args.databricks_connection_config:
+        db_config = parse_connection_config(args.databricks_connection_config)
+        logger.info("🔧 Using Databricks config from connection config")
+    
+    # Setup Databricks authentication
+    env_vars = setup_databricks_authentication(db_config, databricks_host, databricks_token)
+    if not env_vars:
+        logger.error("❌ Failed to setup Databricks authentication")
+        sys.exit(1)
+    
+    # Validate required parameters
+    if not git_url:
+        logger.error("❌ Git URL is required")
+        sys.exit(1)
+    
+    if not yaml_path:
+        logger.error("❌ YAML path is required")
+        sys.exit(1)
+    
+    # Create temporary directory
+    temp_dir = tempfile.mkdtemp(prefix=f"bundle_{operation}_")
+    logger.info(f"📁 Created temporary directory: {temp_dir}")
+    
+    try:
+        # Step 1: Execute git clone
+        if not execute_git_clone(git_url, git_branch, git_token, temp_dir):
+            logger.error("❌ Git clone failed")
+            sys.exit(1)
+        
+        # Step 2: Navigate to yaml file directory
+        yaml_dir = os.path.dirname(yaml_path)
+        if yaml_dir:
+            work_dir = os.path.join(temp_dir, yaml_dir)
+            if os.path.exists(work_dir):
+                logger.info(f"📂 Changed to directory: {work_dir}")
+            else:
+                logger.warning(f"⚠️ Directory not found: {work_dir}, using root")
+                work_dir = temp_dir
+        else:
+            work_dir = temp_dir
+            logger.info(f"📂 Using root directory: {work_dir}")
+        
+        # Step 3: Execute bundle operation
+        if not execute_bundle_operation(operation, target_env, work_dir, env_vars):
+            logger.error("❌ Bundle operation failed")
+            sys.exit(1)
+        
+        logger.info("✅ Bundle operation completed successfully!")
+        
+    finally:
+        # Cleanup
+        try:
+            shutil.rmtree(temp_dir)
+            logger.info(f"🧹 Cleaned up temporary directory: {temp_dir}")
+        except Exception as cleanup_error:
+            logger.warning(f"⚠️ Failed to cleanup temp directory: {cleanup_error}")
