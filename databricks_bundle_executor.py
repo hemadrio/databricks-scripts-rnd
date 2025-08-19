@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.8 - CLI with Hardcoded YAML Test
+Version: 8.9 - CLI with Fixed Auth Type (Auto-detect)
 """
 
 import os
@@ -648,7 +648,6 @@ targets:
     mode: development
     workspace:
       host: {env_vars.get('DATABRICKS_HOST', 'https://dbc-3da7f034-dce2.cloud.databricks.com')}
-      auth_type: oauth
     
 resources:
   jobs:
@@ -975,7 +974,7 @@ if __name__ == "__main__":
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.8)")
+    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.9)")
     logger.info(f"Operation: {args.operation}")
     logger.info(f"Target Environment: {args.target_env}")
     
