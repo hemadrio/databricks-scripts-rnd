@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.9 - CLI with Fixed Auth Type (Auto-detect)
+Version: 8.11 - CLI with PAT Token Parameter Priority
 """
 
 import os
@@ -97,32 +97,39 @@ def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: 
         env_vars['DATABRICKS_HOST'] = host.replace('https://', '').replace('http://', '')
         logger.info(f"🔧 Using Databricks host: {host}")
     
-    # Determine authentication type
-    auth_type = db_config.get('authentication_type', 'personal_access_token')
-    
-    if auth_type == 'service_principal':
-        # Service Principal authentication
-        client_id = db_config.get('client_id')
-        secret = db_config.get('secret')
-        
-        if client_id and secret:
-            env_vars['DATABRICKS_CLIENT_ID'] = client_id
-            env_vars['DATABRICKS_CLIENT_SECRET'] = secret
-            logger.info("🔧 Using Service Principal authentication")
-            logger.info(f"   Client ID: {client_id[:10]}...")
-        else:
-            logger.error("❌ Service Principal authentication requires client_id and secret")
-            return {}
+    # Prioritize PAT token parameter over connection config
+    if databricks_token:
+        # Use provided PAT token directly
+        env_vars['DATABRICKS_TOKEN'] = databricks_token
+        logger.info("🔧 Using provided Personal Access Token authentication")
+        logger.info(f"   Token: {databricks_token[:8]}...")
     else:
-        # Personal Access Token authentication
-        token = databricks_token or db_config.get('personal_access_token') or db_config.get('token')
-        if token:
-            env_vars['DATABRICKS_TOKEN'] = token
-            logger.info("🔧 Using Personal Access Token authentication")
-            logger.info(f"   Token: {token[:10]}...")
+        # Fall back to connection config authentication
+        auth_type = db_config.get('authentication_type', 'personal_access_token')
+        
+        if auth_type == 'service_principal':
+            # Service Principal authentication
+            client_id = db_config.get('client_id')
+            secret = db_config.get('secret')
+            
+            if client_id and secret:
+                env_vars['DATABRICKS_CLIENT_ID'] = client_id
+                env_vars['DATABRICKS_CLIENT_SECRET'] = secret
+                logger.info("🔧 Using Service Principal authentication")
+                logger.info(f"   Client ID: {client_id[:10]}...")
+            else:
+                logger.error("❌ Service Principal authentication requires client_id and secret")
+                return {}
         else:
-            logger.error("❌ Personal Access Token authentication requires token")
-            return {}
+            # Personal Access Token authentication from config
+            token = db_config.get('personal_access_token') or db_config.get('token')
+            if token:
+                env_vars['DATABRICKS_TOKEN'] = token
+                logger.info("🔧 Using Personal Access Token authentication from config")
+                logger.info(f"   Token: {token[:8]}...")
+            else:
+                logger.error("❌ Personal Access Token authentication requires token")
+                return {}
     
     return env_vars
 
@@ -973,7 +980,7 @@ if __name__ == "__main__":
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.9)")
+    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.11)")
     logger.info(f"Operation: {args.operation}")
     logger.info(f"Target Environment: {args.target_env}")
     
