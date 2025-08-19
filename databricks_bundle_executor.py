@@ -12,7 +12,7 @@ Usage via Spark Task Manager:
     python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
 
 Author: DataOps Team
-Version: 8.11 - CLI with PAT Token Parameter Priority
+Version: 8.12 - CLI with Service Principal Parameter Support
 """
 
 import os
@@ -47,6 +47,8 @@ def parse_arguments():
     parser.add_argument('--target_env', default='dev', help='Target environment (dev, prod, staging)')
     parser.add_argument('--databricks_host', help='Databricks workspace host')
     parser.add_argument('--databricks_token', help='Databricks access token')
+    parser.add_argument('--databricks_client_id', help='Databricks Service Principal client ID')
+    parser.add_argument('--databricks_client_secret', help='Databricks Service Principal client secret')
     
     # Connection configurations (JSON strings)
     parser.add_argument('--git_connection_config', help='Git connection configuration as JSON string')
@@ -77,7 +79,7 @@ def parse_connection_config(config_json: str) -> Dict[str, Any]:
         logger.warning(f"Failed to parse connection config: {e}")
     return {}
 
-def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: Optional[str], databricks_token: Optional[str]) -> Dict[str, str]:
+def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: Optional[str], databricks_token: Optional[str], client_id: Optional[str] = None, client_secret: Optional[str] = None) -> Dict[str, str]:
     """
     Setup Databricks authentication based on connection configuration
     
@@ -97,12 +99,19 @@ def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: 
         env_vars['DATABRICKS_HOST'] = host.replace('https://', '').replace('http://', '')
         logger.info(f"🔧 Using Databricks host: {host}")
     
-    # Prioritize PAT token parameter over connection config
+    # Prioritize direct parameters over connection config
     if databricks_token:
         # Use provided PAT token directly
         env_vars['DATABRICKS_TOKEN'] = databricks_token
         logger.info("🔧 Using provided Personal Access Token authentication")
         logger.info(f"   Token: {databricks_token[:8]}...")
+    elif client_id and client_secret:
+        # Use provided Service Principal credentials directly
+        env_vars['DATABRICKS_CLIENT_ID'] = client_id
+        env_vars['DATABRICKS_CLIENT_SECRET'] = client_secret
+        logger.info("🔧 Using provided Service Principal authentication")
+        logger.info(f"   Client ID: {client_id[:8]}...")
+        logger.info(f"   Client Secret: {client_secret[:8]}...")
     else:
         # Fall back to connection config authentication
         auth_type = db_config.get('authentication_type', 'personal_access_token')
@@ -980,7 +989,7 @@ if __name__ == "__main__":
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
     
-    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.11)")
+    logger.info("🚀 Starting Databricks Bundle Executor Script (v8.12)")
     logger.info(f"Operation: {args.operation}")
     logger.info(f"Target Environment: {args.target_env}")
     
@@ -993,6 +1002,8 @@ if __name__ == "__main__":
     target_env = args.target_env
     databricks_host = args.databricks_host
     databricks_token = args.databricks_token
+    databricks_client_id = args.databricks_client_id
+    databricks_client_secret = args.databricks_client_secret
     
     # Parse connection configurations if provided
     git_config = {}
@@ -1015,7 +1026,7 @@ if __name__ == "__main__":
         logger.info("🔧 Using Databricks config from connection config")
     
     # Setup Databricks authentication
-    env_vars = setup_databricks_authentication(db_config, databricks_host, databricks_token)
+    env_vars = setup_databricks_authentication(db_config, databricks_host, databricks_token, databricks_client_id, databricks_client_secret)
     if not env_vars:
         logger.error("❌ Failed to setup Databricks authentication")
         sys.exit(1)
