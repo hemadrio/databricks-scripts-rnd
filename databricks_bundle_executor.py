@@ -77,70 +77,6 @@ def parse_connection_config(config_json: str) -> Dict[str, Any]:
         logger.warning(f"Failed to parse connection config: {e}")
     return {}
 
-def resolve_databricks_secret_via_api(secret_expr: str) -> Optional[str]:
-    """
-    Resolve Databricks secret using Databricks Secrets API directly
-    
-    Args:
-        secret_expr: Secret expression (could be dbutils.secrets.get() or direct value)
-        
-    Returns:
-        Resolved secret value or None if failed
-    """
-    try:
-        # If it's already a direct value (not dbutils.secrets.get), return as-is
-        if 'dbutils.secrets.get' not in secret_expr:
-            return secret_expr
-        
-        # Parse dbutils.secrets.get(scope=secret-test, key=client_id) format
-        # Extract scope and key from the expression
-        if 'scope=' in secret_expr and 'key=' in secret_expr:
-            # Parse the expression
-            scope_start = secret_expr.find('scope=') + 6
-            scope_end = secret_expr.find(',', scope_start)
-            if scope_end == -1:
-                scope_end = secret_expr.find(')', scope_start)
-            
-            key_start = secret_expr.find('key=') + 4
-            key_end = secret_expr.find(')', key_start)
-            
-            scope = secret_expr[scope_start:scope_end].strip().strip("'\"")
-            key = secret_expr[key_start:key_end].strip().strip("'\"")
-            
-            logger.info(f"🔍 Resolving secret: {scope}/{key}")
-            
-            # Use Databricks CLI to get the secret directly
-            try:
-                import subprocess
-                import json
-                
-                # Run databricks secrets get command
-                result = subprocess.run(
-                    ['databricks', 'secrets', 'get', '--scope', scope, '--key', key],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
-                
-                if result.returncode == 0:
-                    # The output might be just the value or JSON format
-                    value = result.stdout.strip()
-                    logger.info(f"✅ Successfully resolved secret: {scope}/{key}")
-                    return value
-                else:
-                    logger.error(f"❌ Databricks CLI failed: {result.stderr}")
-                    
-            except subprocess.TimeoutExpired:
-                logger.error(f"❌ Timeout resolving secret: {scope}/{key}")
-            except Exception as e:
-                logger.error(f"❌ Subprocess error: {str(e)}")
-                
-        return None
-        
-    except Exception as e:
-        logger.error(f"❌ Error resolving secret: {str(e)}")
-        return None
-
 def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: Optional[str], databricks_token: Optional[str]) -> Dict[str, str]:
     """
     Setup Databricks authentication based on connection configuration
@@ -166,38 +102,24 @@ def setup_databricks_authentication(db_config: Dict[str, Any], databricks_host: 
     
     if auth_type == 'service_principal':
         # Service Principal authentication
-        client_id_expr = db_config.get('client_id')
-        secret_expr = db_config.get('secret')
+        client_id = db_config.get('client_id')
+        secret = db_config.get('secret')
         
-        if client_id_expr and secret_expr:
-            # Resolve secrets using the API
-            resolved_client_id = resolve_databricks_secret_via_api(client_id_expr)
-            resolved_secret = resolve_databricks_secret_via_api(secret_expr)
-            
-            if resolved_client_id and resolved_secret:
-                env_vars['DATABRICKS_CLIENT_ID'] = resolved_client_id
-                env_vars['DATABRICKS_CLIENT_SECRET'] = resolved_secret
-                logger.info("🔧 Using Service Principal authentication")
-                logger.info(f"   Client ID: {resolved_client_id[:10]}...")
-            else:
-                logger.error("❌ Failed to resolve service principal credentials")
-                return {}
+        if client_id and secret:
+            env_vars['DATABRICKS_CLIENT_ID'] = client_id
+            env_vars['DATABRICKS_CLIENT_SECRET'] = secret
+            logger.info("🔧 Using Service Principal authentication")
+            logger.info(f"   Client ID: {client_id[:10]}...")
         else:
             logger.error("❌ Service Principal authentication requires client_id and secret")
             return {}
     else:
         # Personal Access Token authentication
-        token_expr = databricks_token or db_config.get('personal_access_token') or db_config.get('token')
-        if token_expr:
-            # Resolve token if it's a secret reference
-            resolved_token = resolve_databricks_secret_via_api(token_expr)
-            if resolved_token:
-                env_vars['DATABRICKS_TOKEN'] = resolved_token
-                logger.info("🔧 Using Personal Access Token authentication")
-                logger.info(f"   Token: {resolved_token[:10]}...")
-            else:
-                logger.error("❌ Failed to resolve Personal Access Token")
-                return {}
+        token = databricks_token or db_config.get('personal_access_token') or db_config.get('token')
+        if token:
+            env_vars['DATABRICKS_TOKEN'] = token
+            logger.info("🔧 Using Personal Access Token authentication")
+            logger.info(f"   Token: {token[:10]}...")
         else:
             logger.error("❌ Personal Access Token authentication requires token")
             return {}
@@ -323,7 +245,7 @@ def main():
         if args.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
         
-        logger.info("🚀 Starting Databricks Bundle Executor Script (v3.1)")
+        logger.info("🚀 Starting Databricks Bundle Executor Script (v4.0)")
         logger.info(f"Operation: {args.operation}")
         logger.info(f"Target Environment: {args.target_env}")
         
