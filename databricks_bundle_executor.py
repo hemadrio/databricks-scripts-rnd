@@ -9,7 +9,9 @@ It supports both Personal Access Token and Service Principal authentication
 and integrates with the existing secret resolution API.
 
 Usage via Spark Task Manager:
-    python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env> --operation <validate|deploy>
+    python databricks_bundle_executor.py --git_url <url> --git_branch <branch> --yaml_path <path> --target_env <env>
+    
+Note: This script automatically performs validate → deploy → summary operations sequentially.
 
 Author: DataOps Team
 Version: 8.13 - Simplified CLI Download with Git YAML
@@ -54,9 +56,9 @@ def parse_arguments():
     parser.add_argument('--git_connection_config', help='Git connection configuration as JSON string')
     parser.add_argument('--databricks_connection_config', help='Databricks connection configuration as JSON string')
     
-    # Operation parameters
-    parser.add_argument('--operation', default='validate', choices=['validate', 'deploy', 'destroy', 'run'], 
-                       help='Bundle operation to perform')
+    # Operation parameters (removed - now always performs validate → deploy → summary)
+    # parser.add_argument('--operation', default='validate', choices=['validate', 'deploy', 'destroy', 'run'], 
+    #                    help='Bundle operation to perform')
     
     # Optional parameters
     parser.add_argument('--timeout', type=int, default=600, help='Operation timeout in seconds')
@@ -606,15 +608,14 @@ if __name__ == "__main__":
         logging.getLogger().setLevel(logging.DEBUG)
     
     logger.info("🚀 Starting Databricks Bundle Executor Script (v8.13)")
-    logger.info(f"Operation: {args.operation}")
     logger.info(f"Target Environment: {args.target_env}")
+    logger.info("🔄 Will perform: validate → deploy → summary")
     
     # Get values from arguments or environment variables
     git_url = args.git_url
     git_branch = args.git_branch
     git_token = args.git_token
     yaml_path = args.yaml_path
-    operation = args.operation
     target_env = args.target_env
     databricks_host = args.databricks_host
     databricks_token = args.databricks_token
@@ -657,7 +658,7 @@ if __name__ == "__main__":
         sys.exit(1)
     
     # Create temporary directory
-    temp_dir = tempfile.mkdtemp(prefix=f"bundle_{operation}_")
+    temp_dir = tempfile.mkdtemp(prefix="bundle_validate_deploy_")
     logger.info(f"📁 Created temporary directory: {temp_dir}")
     
     try:
@@ -679,12 +680,40 @@ if __name__ == "__main__":
             work_dir = temp_dir
             logger.info(f"📂 Using root directory: {work_dir}")
         
-        # Step 3: Execute bundle operation
-        if not execute_bundle_operation(operation, target_env, work_dir, env_vars):
-            logger.error("❌ Bundle operation failed")
+        # Step 3: Execute bundle operations sequentially (validate → deploy → summary)
+        success = True
+        
+        # Step 3a: Validate
+        logger.info("🔍 Step 1/3: Starting bundle validation...")
+        if not execute_bundle_operation("validate", target_env, work_dir, env_vars):
+            logger.error("❌ Bundle validation failed")
+            success = False
+        else:
+            logger.info("✅ Bundle validation completed successfully!")
+        
+        # Step 3b: Deploy (only if validation succeeded)
+        if success:
+            logger.info("🚀 Step 2/3: Starting bundle deployment...")
+            if not execute_bundle_operation("deploy", target_env, work_dir, env_vars):
+                logger.error("❌ Bundle deployment failed")
+                success = False
+            else:
+                logger.info("✅ Bundle deployment completed successfully!")
+        
+        # Step 3c: Summary (only if deployment succeeded)
+        if success:
+            logger.info("📊 Step 3/3: Generating bundle summary...")
+            if not execute_bundle_operation("summary", target_env, work_dir, env_vars):
+                logger.error("❌ Bundle summary failed")
+                success = False
+            else:
+                logger.info("✅ Bundle summary completed successfully!")
+        
+        if not success:
+            logger.error("❌ One or more bundle operations failed")
             sys.exit(1)
         
-        logger.info("✅ Bundle operation completed successfully!")
+        logger.info("🎉 All bundle operations completed successfully!")
         
     finally:
         # Cleanup
