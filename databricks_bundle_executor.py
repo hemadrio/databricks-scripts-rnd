@@ -379,7 +379,7 @@ def download_security_scanner() -> Optional[str]:
         try:
             # Download scanner
             tar_path = os.path.join(temp_scanner_dir, "scanner.tar.gz")
-            logger.info(f"🌐 Downloading security scanner from: {scanner_url}")
+            logger.info("🌐 Downloading security scanner...")
             
             response = requests.get(scanner_url, timeout=120)
             response.raise_for_status()
@@ -387,7 +387,7 @@ def download_security_scanner() -> Optional[str]:
             with open(tar_path, 'wb') as f:
                 f.write(response.content)
             
-            logger.info(f"✅ Security scanner downloaded successfully ({len(response.content)} bytes)")
+            logger.info("✅ Security scanner downloaded successfully")
             
             # Extract scanner
             logger.info("📦 Extracting security scanner...")
