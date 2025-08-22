@@ -201,6 +201,171 @@ def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], t
         logger.error(f"❌ Git clone operation failed: {str(e)}")
         return False
 
+def execute_security_scan(temp_dir: str) -> None:
+    """
+    Execute security scan on the cloned repository
+    
+    Args:
+        temp_dir: Directory containing the cloned repository
+    """
+    try:
+        logger.info("🔍 Starting security vulnerability scan...")
+        
+        # Download security scanner if not available
+        scanner_path = download_security_scanner()
+        if not scanner_path:
+            logger.warning("⚠️ Security scanner not available - skipping security scan")
+            return
+        
+        # Security scan command with suppressed logs and non-failing behavior
+        scan_cmd = [
+            scanner_path, "detect",
+            "--source", temp_dir,
+            "--log-level", "error",
+            "--exit-code", "0",
+            "--report-format", "json",
+            "--report-path", os.path.join(temp_dir, "security-report.json")
+        ]
+        
+        logger.info("🔍 Executing security vulnerability scan...")
+        
+        # Execute security scan
+        scan_result = subprocess.run(
+            scan_cmd, capture_output=True, text=True, timeout=300
+        )
+        
+        # Always log the scan completion (regardless of exit code)
+        logger.info("✅ Security scan completed")
+        
+        # Check if report file was created
+        report_path = os.path.join(temp_dir, "security-report.json")
+        if os.path.exists(report_path):
+            try:
+                with open(report_path, 'r') as f:
+                    report_content = f.read().strip()
+                
+                if report_content:
+                    # Parse JSON to count vulnerabilities
+                    try:
+                        vulnerabilities = json.loads(report_content)
+                        if isinstance(vulnerabilities, list):
+                            if len(vulnerabilities) > 0:
+                                logger.warning(f"⚠️ Security scan found {len(vulnerabilities)} potential security vulnerabilities:")
+                                for i, vuln in enumerate(vulnerabilities[:5], 1):  # Show first 5
+                                    logger.warning(f"   {i}. {vuln.get('rule', 'Unknown rule')} - {vuln.get('file', 'Unknown file')}")
+                                if len(vulnerabilities) > 5:
+                                    logger.warning(f"   ... and {len(vulnerabilities) - 5} more vulnerabilities")
+                                logger.info(f"📄 Full security report saved to: {report_path}")
+                            else:
+                                logger.info("✅ No security vulnerabilities detected")
+                        else:
+                            logger.info("✅ No security vulnerabilities detected")
+                    except json.JSONDecodeError:
+                        logger.warning("⚠️ Security scan report contains vulnerabilities (JSON parsing failed)")
+                        logger.info(f"📄 Raw security report saved to: {report_path}")
+                else:
+                    logger.info("✅ No security vulnerabilities detected")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Could not read security scan report: {str(e)}")
+        else:
+            logger.info("✅ No security vulnerabilities detected")
+            
+    except subprocess.TimeoutExpired:
+        logger.warning("⏰ Security scan timed out - continuing with bundle operations")
+    except Exception as e:
+        logger.warning(f"⚠️ Security scan failed: {str(e)} - continuing with bundle operations")
+
+def download_security_scanner() -> Optional[str]:
+    """
+    Download security scanner tool
+    
+    Returns:
+        Path to the scanner binary or None if download failed
+    """
+    try:
+        import platform
+        import tempfile
+        import shutil
+        
+        logger.info("📥 Downloading security scanner...")
+        
+        # Determine platform and download URL
+        version = "8.28.0"
+        system = platform.system().lower()
+        arch = platform.machine().lower()
+        
+        if system == "linux":
+            if arch in ["x86_64", "amd64"]:
+                scanner_url = f"https://github.com/gitleaks/gitleaks/releases/download/v{version}/gitleaks_{version}_linux_x64.tar.gz"
+            elif arch == "arm64":
+                scanner_url = f"https://github.com/gitleaks/gitleaks/releases/download/v{version}/gitleaks_{version}_linux_arm64.tar.gz"
+            else:
+                logger.warning(f"⚠️ Unsupported Linux architecture: {arch}")
+                return None
+        elif system == "darwin":
+            if arch in ["x86_64", "amd64"]:
+                scanner_url = f"https://github.com/gitleaks/gitleaks/releases/download/v{version}/gitleaks_{version}_darwin_x64.tar.gz"
+            elif arch == "arm64":
+                scanner_url = f"https://github.com/gitleaks/gitleaks/releases/download/v{version}/gitleaks_{version}_darwin_arm64.tar.gz"
+            else:
+                logger.warning(f"⚠️ Unsupported macOS architecture: {arch}")
+                return None
+        else:
+            logger.warning(f"⚠️ Unsupported platform: {system}")
+            return None
+        
+        # Create temporary directory for scanner
+        temp_scanner_dir = tempfile.mkdtemp(prefix="security_scanner_")
+        logger.info(f"📁 Created temporary scanner directory: {temp_scanner_dir}")
+        
+        try:
+            # Download scanner
+            tar_path = os.path.join(temp_scanner_dir, "scanner.tar.gz")
+            logger.info(f"🌐 Downloading security scanner from: {scanner_url}")
+            
+            response = requests.get(scanner_url, timeout=120)
+            response.raise_for_status()
+            
+            with open(tar_path, 'wb') as f:
+                f.write(response.content)
+            
+            logger.info(f"✅ Security scanner downloaded successfully ({len(response.content)} bytes)")
+            
+            # Extract scanner
+            logger.info("📦 Extracting security scanner...")
+            result = subprocess.run(
+                ["tar", "-xzf", tar_path, "-C", temp_scanner_dir],
+                capture_output=True, text=True, timeout=30
+            )
+            
+            if result.returncode != 0:
+                logger.error(f"❌ Failed to extract security scanner: {result.stderr}")
+                return None
+            
+            # Find the scanner binary
+            scanner_binary_name = "gitleaks"
+            scanner_path = os.path.join(temp_scanner_dir, scanner_binary_name)
+            
+            if not os.path.exists(scanner_path):
+                # List files in directory for debugging
+                files = os.listdir(temp_scanner_dir)
+                logger.error(f"❌ Security scanner binary not found. Available files: {files}")
+                return None
+            
+            os.chmod(scanner_path, 0o755)
+            logger.info(f"🔧 Security scanner ready at: {scanner_path}")
+            
+            return scanner_path
+            
+        except Exception as e:
+            logger.error(f"❌ Security scanner download failed: {str(e)}")
+            return None
+            
+    except Exception as e:
+        logger.error(f"❌ Security scanner setup failed: {str(e)}")
+        return None
+
 def create_databricks_config(env_vars: Dict[str, str]) -> str:
     """
     Create a temporary .databrickscfg file for non-interactive authentication
@@ -666,6 +831,9 @@ if __name__ == "__main__":
         if not execute_git_clone(git_url, git_branch, git_token, temp_dir):
             logger.error("❌ Git clone failed")
             sys.exit(1)
+        
+        # Step 1.5: Execute security vulnerability scan
+        execute_security_scan(temp_dir)
         
         # Step 2: Navigate to yaml file directory
         yaml_dir = os.path.dirname(yaml_path)
