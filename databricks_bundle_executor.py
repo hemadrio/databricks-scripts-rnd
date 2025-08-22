@@ -543,20 +543,23 @@ def execute_bundle_operation(operation: str, target_env: str, work_dir: str,
         # Fall back to downloading modern CLI after general error
         return download_and_execute_bundle_operation(operation, target_env, work_dir, env_vars)
 
-def download_and_execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
-                                        env_vars: Dict[str, str]) -> bool:
+# Global variable to cache the CLI path
+_cached_cli_path = None
+
+def download_databricks_cli() -> Optional[str]:
     """
-    Download modern Databricks CLI and execute bundle operation
+    Download Databricks CLI and return the path to the binary
     
-    Args:
-        operation: Bundle operation (validate, deploy, etc.)
-        target_env: Target environment
-        work_dir: Working directory
-        env_vars: Environment variables for Databricks authentication
-        
     Returns:
-        True if successful, False otherwise
+        Path to the CLI binary or None if download failed
     """
+    global _cached_cli_path
+    
+    # Return cached CLI path if available
+    if _cached_cli_path and os.path.exists(_cached_cli_path):
+        logger.info("🔧 Using cached Databricks CLI")
+        return _cached_cli_path
+    
     import platform
     import requests
     import tempfile
@@ -574,7 +577,7 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
             cli_url = f"https://github.com/databricks/cli/releases/download/v{version}/databricks_cli_{version}_darwin_amd64.zip"
         else:
             logger.error(f"❌ Unsupported platform: {system}")
-            return False
+            return None
         
         # Create temporary directory for CLI
         temp_cli_dir = tempfile.mkdtemp(prefix="databricks_cli_")
@@ -583,7 +586,7 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
         try:
             # Download CLI
             zip_path = os.path.join(temp_cli_dir, "databricks.zip")
-            logger.info(f"🌐 Downloading CLI from: {cli_url}")
+            logger.info("🌐 Downloading CLI...")
             
             response = requests.get(cli_url, timeout=120)
             response.raise_for_status()
@@ -591,7 +594,7 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
             with open(zip_path, 'wb') as f:
                 f.write(response.content)
             
-            logger.info(f"✅ CLI downloaded successfully ({len(response.content)} bytes)")
+            logger.info("✅ CLI downloaded successfully")
             
             # Extract CLI
             logger.info("📦 Extracting CLI...")
@@ -602,7 +605,7 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
             
             if result.returncode != 0:
                 logger.error(f"❌ Failed to extract CLI: {result.stderr}")
-                return False
+                return None
             
             # Set executable permissions (CLI binary name may vary)
             cli_binary_name = "databricks"
@@ -621,64 +624,89 @@ def download_and_execute_bundle_operation(operation: str, target_env: str, work_
                     # List files in directory for debugging
                     files = os.listdir(temp_cli_dir)
                     logger.error(f"❌ CLI binary not found. Available files: {files}")
-                    return False
+                    return None
             
             os.chmod(cli_path, 0o755)
             logger.info(f"🔧 CLI ready at: {cli_path}")
             
-            # Test CLI
-            version_result = subprocess.run(
-                [cli_path, "version"], capture_output=True, text=True, timeout=30, env=env_vars
-            )
+            # Cache the CLI path
+            _cached_cli_path = cli_path
+            return cli_path
             
-            if version_result.returncode == 0:
-                logger.info(f"✅ Modern CLI version: {version_result.stdout.strip()}")
-            else:
-                logger.warning(f"⚠️ CLI version check failed: {version_result.stderr}")
+        except Exception as e:
+            logger.error(f"❌ CLI download failed: {str(e)}")
+            return None
             
-            # Execute bundle operation using the actual YAML from Git
-            logger.info(f"🚀 Executing bundle {operation} with downloaded CLI...")
-            logger.info(f"📂 Using Git repository YAML file")
-            
-            bundle_cmd = [cli_path, "bundle", operation]
-            
-            if target_env:
-                bundle_cmd.extend(["-t", target_env])
-            
-            logger.info(f"Executing: {' '.join(bundle_cmd)}")
-            
-            # Set up environment
-            env = os.environ.copy()
-            env.update(env_vars)
-            
-            bundle_result = subprocess.run(
-                bundle_cmd, capture_output=True, text=True, timeout=600,
-                cwd=work_dir, env=env
-            )
-            
-            if bundle_result.returncode == 0:
-                logger.info("✅ Bundle operation completed successfully with downloaded CLI!")
-                if bundle_result.stdout:
-                    logger.info(f"📄 CLI Output:\n{bundle_result.stdout}")
-                return True
-            else:
-                logger.error(f"❌ Bundle operation failed with return code: {bundle_result.returncode}")
-                if bundle_result.stderr:
-                    logger.error(f"CLI Error: {bundle_result.stderr}")
-                if bundle_result.stdout:
-                    logger.error(f"CLI Output: {bundle_result.stdout}")
-                return False
-                
-        finally:
-            # Cleanup temporary directory
-            try:
-                shutil.rmtree(temp_cli_dir)
-                logger.info(f"🧹 Cleaned up temporary CLI directory: {temp_cli_dir}")
-            except Exception as cleanup_error:
-                logger.warning(f"⚠️ Failed to cleanup temp directory: {cleanup_error}")
+    except Exception as e:
+        logger.error(f"❌ CLI setup failed: {str(e)}")
+        return None
+
+def download_and_execute_bundle_operation(operation: str, target_env: str, work_dir: str, 
+                                        env_vars: Dict[str, str]) -> bool:
+    """
+    Execute bundle operation using cached or downloaded Databricks CLI
+    
+    Args:
+        operation: Bundle operation (validate, deploy, etc.)
+        target_env: Target environment
+        work_dir: Working directory
+        env_vars: Environment variables for Databricks authentication
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Get CLI path (download if needed)
+        cli_path = download_databricks_cli()
+        if not cli_path:
+            logger.error("❌ Failed to get Databricks CLI")
+            return False
+        
+        # Test CLI
+        version_result = subprocess.run(
+            [cli_path, "version"], capture_output=True, text=True, timeout=30, env=env_vars
+        )
+        
+        if version_result.returncode == 0:
+            logger.info(f"✅ Modern CLI version: {version_result.stdout.strip()}")
+        else:
+            logger.warning(f"⚠️ CLI version check failed: {version_result.stderr}")
+        
+        # Execute bundle operation using the actual YAML from Git
+        logger.info(f"🚀 Executing bundle {operation} with downloaded CLI...")
+        logger.info(f"📂 Using Git repository YAML file")
+        
+        bundle_cmd = [cli_path, "bundle", operation]
+        
+        if target_env:
+            bundle_cmd.extend(["-t", target_env])
+        
+        logger.info(f"Executing: {' '.join(bundle_cmd)}")
+        
+        # Set up environment
+        env = os.environ.copy()
+        env.update(env_vars)
+        
+        bundle_result = subprocess.run(
+            bundle_cmd, capture_output=True, text=True, timeout=600,
+            cwd=work_dir, env=env
+        )
+        
+        if bundle_result.returncode == 0:
+            logger.info("✅ Bundle operation completed successfully with downloaded CLI!")
+            if bundle_result.stdout:
+                logger.info(f"📄 CLI Output:\n{bundle_result.stdout}")
+            return True
+        else:
+            logger.error(f"❌ Bundle operation failed with return code: {bundle_result.returncode}")
+            if bundle_result.stderr:
+                logger.error(f"CLI Error: {bundle_result.stderr}")
+            if bundle_result.stdout:
+                logger.error(f"CLI Output: {bundle_result.stdout}")
+            return False
         
     except Exception as e:
-        logger.error(f"❌ CLI download and execution failed: {str(e)}")
+        logger.error(f"❌ Bundle operation failed: {str(e)}")
         return False
 
 # Hardcoded YAML test function removed - always use actual Git YAML
