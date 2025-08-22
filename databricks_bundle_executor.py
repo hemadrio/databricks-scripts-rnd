@@ -246,8 +246,13 @@ def execute_security_scan(temp_dir: str) -> None:
                 
                 with open(report_path, 'r', newline='', encoding='utf-8') as f:
                     csv_reader = csv.DictReader(f)
+                    # Debug: Log the CSV headers
+                    logger.debug(f"📋 CSV headers: {csv_reader.fieldnames}")
                     for row in csv_reader:
                         vulnerabilities.append(row)
+                        # Debug: Log the first row structure
+                        if len(vulnerabilities) == 1:
+                            logger.debug(f"📋 First CSV row: {dict(row)}")
                 
                 if vulnerabilities:
                     logger.warning(f"⚠️ Security scan found {len(vulnerabilities)} potential security vulnerabilities:")
@@ -299,6 +304,30 @@ def execute_security_scan(temp_dir: str) -> None:
         logger.warning("⏰ Security scan timed out - continuing with bundle operations")
     except Exception as e:
         logger.warning(f"⚠️ Security scan failed: {str(e)} - continuing with bundle operations")
+
+def display_csv_report(report_path: str) -> None:
+    """
+    Display the raw CSV report content
+    
+    Args:
+        report_path: Path to the CSV report file
+    """
+    try:
+        if os.path.exists(report_path):
+            logger.info(f"📄 Displaying CSV report from: {report_path}")
+            with open(report_path, 'r', newline='', encoding='utf-8') as f:
+                content = f.read()
+                if content.strip():
+                    logger.info("📋 CSV Report Content:")
+                    logger.info("=" * 80)
+                    logger.info(content)
+                    logger.info("=" * 80)
+                else:
+                    logger.info("📋 CSV file is empty")
+        else:
+            logger.warning(f"⚠️ CSV report file not found: {report_path}")
+    except Exception as e:
+        logger.error(f"❌ Error reading CSV report: {str(e)}")
 
 def download_security_scanner() -> Optional[str]:
     """
@@ -858,6 +887,10 @@ if __name__ == "__main__":
         
         # Step 1.5: Execute security vulnerability scan
         execute_security_scan(temp_dir)
+        
+        # Display CSV report for debugging
+        csv_report_path = os.path.join(temp_dir, "security-report.csv")
+        display_csv_report(csv_report_path)
         
         # Step 2: Navigate to yaml file directory
         yaml_dir = os.path.dirname(yaml_path)
