@@ -223,8 +223,8 @@ def execute_security_scan(temp_dir: str) -> None:
             "--source", temp_dir,
             "--log-level", "error",
             "--exit-code", "0",
-            "--report-format", "json",
-            "--report-path", os.path.join(temp_dir, "security-report.json")
+            "--report-format", "csv",
+            "--report-path", os.path.join(temp_dir, "security-report.csv")
         ]
         
         logger.info("🔍 Executing security vulnerability scan...")
@@ -238,36 +238,60 @@ def execute_security_scan(temp_dir: str) -> None:
         logger.info("✅ Security scan completed")
         
         # Check if report file was created
-        report_path = os.path.join(temp_dir, "security-report.json")
+        report_path = os.path.join(temp_dir, "security-report.csv")
         if os.path.exists(report_path):
             try:
-                with open(report_path, 'r') as f:
-                    report_content = f.read().strip()
+                import csv
+                vulnerabilities = []
                 
-                if report_content:
-                    # Parse JSON to count vulnerabilities
-                    try:
-                        vulnerabilities = json.loads(report_content)
-                        if isinstance(vulnerabilities, list):
-                            if len(vulnerabilities) > 0:
-                                logger.warning(f"⚠️ Security scan found {len(vulnerabilities)} potential security vulnerabilities:")
-                                for i, vuln in enumerate(vulnerabilities[:5], 1):  # Show first 5
-                                    logger.warning(f"   {i}. {vuln.get('rule', 'Unknown rule')} - {vuln.get('file', 'Unknown file')}")
-                                if len(vulnerabilities) > 5:
-                                    logger.warning(f"   ... and {len(vulnerabilities) - 5} more vulnerabilities")
-                                logger.info(f"📄 Full security report saved to: {report_path}")
+                with open(report_path, 'r', newline='', encoding='utf-8') as f:
+                    csv_reader = csv.DictReader(f)
+                    for row in csv_reader:
+                        vulnerabilities.append(row)
+                
+                if vulnerabilities:
+                    logger.warning(f"⚠️ Security scan found {len(vulnerabilities)} potential security vulnerabilities:")
+                    for i, vuln in enumerate(vulnerabilities[:5], 1):  # Show first 5
+                        rule_name = vuln.get('rule', 'Unknown rule')
+                        file_path = vuln.get('file', 'Unknown file')
+                        start_line = vuln.get('start_line', '')
+                        end_line = vuln.get('end_line', '')
+                        match_value = vuln.get('match', '')
+                        description = vuln.get('description', '')
+                        
+                        # Truncate match value for display
+                        if match_value and len(match_value) > 50:
+                            match_value = match_value[:47] + "..."
+                        
+                        display_info = f"{rule_name} - {file_path}"
+                        if start_line:
+                            if end_line and end_line != start_line:
+                                display_info += f":{start_line}-{end_line}"
                             else:
-                                logger.info("✅ No security vulnerabilities detected")
-                        else:
-                            logger.info("✅ No security vulnerabilities detected")
-                    except json.JSONDecodeError:
-                        logger.warning("⚠️ Security scan report contains vulnerabilities (JSON parsing failed)")
-                        logger.info(f"📄 Raw security report saved to: {report_path}")
+                                display_info += f":{start_line}"
+                        if description:
+                            display_info += f" ({description})"
+                        elif match_value:
+                            display_info += f" ({match_value})"
+                        
+                        logger.warning(f"   {i}. {display_info}")
+                    
+                    if len(vulnerabilities) > 5:
+                        logger.warning(f"   ... and {len(vulnerabilities) - 5} more vulnerabilities")
+                    logger.info(f"📄 Full security report saved to: {report_path}")
                 else:
                     logger.info("✅ No security vulnerabilities detected")
                     
             except Exception as e:
                 logger.warning(f"⚠️ Could not read security scan report: {str(e)}")
+                # Log a sample of the raw content for debugging
+                try:
+                    with open(report_path, 'r') as f:
+                        content = f.read().strip()
+                        if content:
+                            logger.debug(f"📋 Raw CSV content: {content[:200]}...")
+                except:
+                    pass
         else:
             logger.info("✅ No security vulnerabilities detected")
             
