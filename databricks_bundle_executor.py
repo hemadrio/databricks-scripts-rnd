@@ -181,7 +181,13 @@ def execute_git_clone(git_url: str, git_branch: str, git_token: Optional[str], t
         
         # Execute git clone
         clone_cmd = f"git clone {authenticated_url} --depth 1 --branch {git_branch} {temp_dir}"
-        logger.info(f"Executing: {clone_cmd}")
+        
+        # Mask the token in the displayed command for security
+        if git_token:
+            masked_cmd = clone_cmd.replace(git_token, "***MASKED***")
+            logger.info(f"Executing: {masked_cmd}")
+        else:
+            logger.info(f"Executing: {clone_cmd}")
         
         clone_result = subprocess.run(
             clone_cmd, shell=True, capture_output=True, text=True, timeout=300
