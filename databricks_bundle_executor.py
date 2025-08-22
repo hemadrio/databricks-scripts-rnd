@@ -257,12 +257,15 @@ def execute_security_scan(temp_dir: str) -> None:
                 if vulnerabilities:
                     logger.warning(f"⚠️ Security scan found {len(vulnerabilities)} potential security vulnerabilities:")
                     for i, vuln in enumerate(vulnerabilities[:5], 1):  # Show first 5
-                        rule_name = vuln.get('rule', 'Unknown rule')
-                        file_path = vuln.get('file', 'Unknown file')
-                        start_line = vuln.get('start_line', '')
-                        end_line = vuln.get('end_line', '')
-                        match_value = vuln.get('match', '')
-                        description = vuln.get('description', '')
+                        # Use correct CSV column names from the actual output
+                        rule_name = vuln.get('RuleID', 'Unknown rule')
+                        file_path = vuln.get('File', 'Unknown file')
+                        start_line = vuln.get('StartLine', '')
+                        end_line = vuln.get('EndLine', '')
+                        match_value = vuln.get('Match', '')
+                        secret_value = vuln.get('Secret', '')
+                        author = vuln.get('Author', '')
+                        message = vuln.get('Message', '')
                         
                         # Truncate match value for display
                         if match_value and len(match_value) > 50:
@@ -274,10 +277,12 @@ def execute_security_scan(temp_dir: str) -> None:
                                 display_info += f":{start_line}-{end_line}"
                             else:
                                 display_info += f":{start_line}"
-                        if description:
-                            display_info += f" ({description})"
-                        elif match_value:
+                        
+                        # Show match value or secret value
+                        if match_value:
                             display_info += f" ({match_value})"
+                        elif secret_value:
+                            display_info += f" (Secret: {secret_value[:20]}...)"
                         
                         logger.warning(f"   {i}. {display_info}")
                     
