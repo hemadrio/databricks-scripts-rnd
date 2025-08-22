@@ -278,11 +278,10 @@ def execute_security_scan(temp_dir: str) -> None:
                             else:
                                 display_info += f":{start_line}"
                         
-                        # Show match value or secret value
-                        if match_value:
-                            display_info += f" ({match_value})"
-                        elif secret_value:
-                            display_info += f" (Secret: {secret_value[:20]}...)"
+                        # Show link for more details
+                        link = vuln.get('Link', '')
+                        if link:
+                            display_info += f" - {link}"
                         
                         logger.warning(f"   {i}. {display_info}")
                     
@@ -893,9 +892,9 @@ if __name__ == "__main__":
         # Step 1.5: Execute security vulnerability scan
         execute_security_scan(temp_dir)
         
-        # Display CSV report for debugging
-        csv_report_path = os.path.join(temp_dir, "security-report.csv")
-        display_csv_report(csv_report_path)
+        # Display CSV report for debugging (commented out)
+        # csv_report_path = os.path.join(temp_dir, "security-report.csv")
+        # display_csv_report(csv_report_path)
         
         # Step 2: Navigate to yaml file directory
         yaml_dir = os.path.dirname(yaml_path)
